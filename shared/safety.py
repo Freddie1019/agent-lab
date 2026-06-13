@@ -60,39 +60,46 @@ default_approver = CLIApprover()
 
 
 # ===== 安全执行器 =====
-def safe_execute(
-    metadata: ToolMetadata,
-    tool_args: dict,
-    approver: CLIApprover = default_approver,
-    agent_reasoning: str = "",
-) -> Any:
-    """
-    根据工具危险等级，自动应用相应的安全策略
-    """
-    level = metadata.danger_level
+# 在 shared/safety.py 里改 safe_execute
+def safe_execute(metadata, tool_args, approver=default_approver, agent_reasoning=""):
+    from shared.audit_log import audit
+    import time
     
-    # BLACK: 永久禁止
-    if level == DangerLevel.BLACK:
-        raise ToolHumanRejected(
-            f"工具 {metadata.name} 被列入黑名单，永久禁止执行"
-        )
+    start = time.time()
+    approved = None
+    error_msg = ""
+    result = ""
     
-    # RED: 必须人工确认
-    if level == DangerLevel.RED:
-        approved = approver.request_approval(
+    try:
+        if metadata.danger_level == DangerLevel.BLACK:
+            error_msg = "工具被黑名单拦截"
+            raise ToolHumanRejected(error_msg)
+        
+        if metadata.danger_level == DangerLevel.RED:
+            approved = approver.request_approval(
+                tool_name=metadata.name,
+                tool_args=tool_args,
+                reasoning=agent_reasoning,
+            )
+            if not approved:
+                error_msg = "用户拒绝执行"
+                raise ToolHumanRejected(error_msg)
+        
+        result = metadata.func(**tool_args)
+        return result
+    
+    except Exception as e:
+        if not error_msg:
+            error_msg = str(e)
+        raise
+    finally:
+        audit.log(
+            event_type="tool_call",
             tool_name=metadata.name,
             tool_args=tool_args,
-            reasoning=agent_reasoning,
+            danger_level=metadata.danger_level.value,
+            approved=approved,
+            result=str(result),
+            error=error_msg,
+            duration_ms=(time.time() - start) * 1000,
         )
-        if not approved:
-            raise ToolHumanRejected(
-                f"用户拒绝执行 {metadata.name}({tool_args})"
-            )
-        print(f"✅ 用户已批准 {metadata.name}")
-    
-    # YELLOW: 执行前打审计日志（不阻塞）
-    if level == DangerLevel.YELLOW:
-        print(f"📝 [审计] 即将执行 {metadata.name}({tool_args})")
-    
-    # GREEN / YELLOW / RED(已批准): 实际执行
-    return metadata.func(**tool_args)

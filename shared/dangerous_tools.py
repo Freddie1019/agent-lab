@@ -4,13 +4,15 @@
 """
 import os
 import pathlib
+import tempfile
 from shared.safety import ToolMetadata, DangerLevel
 from shared.agent_errors import ToolInvalidArgument
 
 
 # ===== 限制操作范围（安全护栏）=====
-SAFE_WORKING_DIR = pathlib.Path("/tmp/agent_sandbox")
-SAFE_WORKING_DIR.mkdir(exist_ok=True)
+# 用系统临时目录，跨平台（Windows→%TEMP%，Linux/Mac→/tmp）
+SAFE_WORKING_DIR = pathlib.Path(tempfile.gettempdir()) / "agent_sandbox"
+SAFE_WORKING_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _validate_path(path_str: str) -> pathlib.Path:
