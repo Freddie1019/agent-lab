@@ -4,7 +4,7 @@
 """
 from enum import Enum
 from typing import Optional
-from unicodedata import category
+
 
 class ErrorCategory(str, Enum):
     """错误大类，决定处理策略"""
@@ -14,19 +14,20 @@ class ErrorCategory(str, Enum):
     SAFETY = "safety"            # 安全问题，需要人工
     UNKNOWN = "unknown"          # 未分类，谨慎处理
 
-class AgentError(Exception):
-    """所有 Agent 的错误基类"""
-    category: ErrorCategory = ErrorCategory.UNKNOWN
-    user_message: str = "操作失败" # 给 LLM 看的业务话术
-    retryable: bool = False
-    retry_after: Optional[float] = None # 多少秒后可重试
 
-    def __init__(self, detail: str = '', **kwargs):
+class AgentError(Exception):
+    """所有 Agent 错误的基类"""
+    category: ErrorCategory = ErrorCategory.UNKNOWN
+    user_message: str = "操作失败"  # 给 LLM 看的业务话术
+    retryable: bool = False
+    retry_after: Optional[float] = None  # 多少秒后可重试
+
+    def __init__(self, detail: str = "", **kwargs):
         super().__init__(detail)
         self.detail = detail
-        for k,v in kwargs.items():
+        for k, v in kwargs.items():
             setattr(self, k, v)
-    
+
     def to_llm_message(self) -> str:
         """生成喂给 LLM 的错误描述（绝不暴露 Traceback）"""
         msg = self.user_message
@@ -42,11 +43,13 @@ class ToolTimeout(AgentError):
     user_message = "工具执行超时，请重试或换个方式查询"
     retryable = True
 
+
 class ToolRateLimit(AgentError):
     category = ErrorCategory.RATE_LIMIT
     user_message = "工具调用次数已达上限，请稍后再试"
     retryable = True
     retry_after = 30.0
+
 
 class ToolInvalidArgument(AgentError):
     category = ErrorCategory.PERMANENT
@@ -72,10 +75,11 @@ class ToolHumanRejected(AgentError):
     user_message = "此操作被用户拒绝，请询问用户是否需要其他方案"
     retryable = False
 
+
 def classify_exception(e: Exception) -> AgentError:
     """把任意异常转化为 AgentError（兜底翻译器）"""
     import httpx
-
+    
     if isinstance(e, AgentError):
         return e
     
