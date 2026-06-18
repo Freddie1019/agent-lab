@@ -1,0 +1,36 @@
+{
+  "question": "Tavily API 的免费额度是多少？",
+  "status": "running",
+  "duration_seconds": 9.402061700820923,
+  "steps": "success",
+  "tool_calls": 2,
+  "compressions": 0,
+  "hitl_triggers": 0,
+  "total_input_tokens": 1530,
+  "total_output_tokens": 86,
+  "estimated_cost_usd": 0.0002811,
+  "final_answer": "Tavily API 的免费额度为每月 1,000 次 API 调用，无需信用卡，提供电子邮件支持。对于更高的使用需求，Tavily 还提供其他付费计划，例如每月 4,000 次调用的项目计划。\n\n更多信息可以参考 Tavily 的定价页面：[Tavily Pricing](https://www.tavily.com/pricing)。",
+  "errors": [],
+  "tool_call_details": [
+    {
+      "step": 1,
+      "tool": "web_search",
+      "args": {
+        "query": "Tavily API 免费额度"
+      },
+      "duration_ms": 1677.9839992523193,
+      "success": true,
+      "result_preview": "搜索查询： Tavily API 免费额度\n\n[结果 1] 大模型可调用的在线搜索工具_tavily search免费额度 - CSDN博客\n  URL: https://blog.csdn.net/MurphyStar/article/details/144959058\n  摘要: 安装配置简单，"
+    },
+    {
+      "step": 2,
+      "tool": "fetch_url",
+      "args": {
+        "url": "https://www.tavily.com/pricing"
+      },
+      "duration_ms": 371.1879253387451,
+      "success": true,
+      "result_preview": "/pricing plans\nFind a plan to power your AI Agents\nResearcher\nFree\n/ monthFor new creators\n1,000 API credits / month\nNo credit card required\nEmail sup"
+    }
+  ]
+}
