@@ -2,21 +2,22 @@
 统一的 LLM 客户端
 后面所有脚本都从这里 import，避免重复初始化代码
 """
-import os
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 from openai import OpenAI
+from deep_research_agent.core.settings import get_settings
 
-load_dotenv()
+settings = get_settings()
+# load_dotenv()
 # client = OpenAI(
 #     api_key=os.getenv("MOONSHOT_API_KEY"),
 #     base_url=os.getenv("MOONSHOT_BASE_KEY"),
 # )
 
 client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),
+    api_key=settings.openai_api_key,
+    base_url=settings.openai_base_url,
 )
 
 # DEFAULT_MODEL = "kimi-k2.6"
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = settings.default_model
