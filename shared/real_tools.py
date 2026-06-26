@@ -151,6 +151,7 @@ REAL_TOOLS_REGISTRY = {
 
 def execute_real_tool(tool_name: str, tool_args: dict) -> str:
     """统一的工具执行入口"""
+    print(f"🔍 DEBUG: execute_real_tool 被调用，工具={tool_name}")
     if tool_name not in REAL_TOOLS_REGISTRY:
         return f"错误：未知工具 '{tool_name}'"
     

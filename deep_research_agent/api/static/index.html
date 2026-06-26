@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>Deep Research Agent</title>
+    <style>
+        body {
+            font-family: -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .question-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input {
+            flex: 1;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        button {
+            padding: 12px 24px;
+            background: #6366f1;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:disabled {
+            background: #ccc;
+        }
+        .events {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            min-height: 400px;
+        }
+        .event {
+            margin: 12px 0;
+            padding: 12px;
+            border-radius: 6px;
+            border-left: 4px solid #ddd;
+        }
+        .event-thought { border-color: #6366f1; background: #eef2ff; }
+        .event-tool_call { border-color: #f59e0b; background: #fef3c7; }
+        .event-tool_result { border-color: #10b981; background: #d1fae5; }
+        .event-error { border-color: #ef4444; background: #fee2e2; }
+        .event-answer_complete { border-color: #6366f1; background: #fff; font-weight: 500; }
+        .event-type { font-size: 12px; color: #666; text-transform: uppercase; }
+        .event-content { margin-top: 6px; }
+        .event pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin: 0; }
+    </style>
+</head>
+<body>
+    <h1>🔬 Deep Research Agent</h1>
+    
+    <div class="question-box">
+        <input id="question" type="text" placeholder="请输入研究问题..." value="LangGraph 是什么？请简要介绍" />
+        <button id="ask-btn" onclick="askAgent()">开始研究</button>
+    </div>
+    <button id="cancel-btn" onclick="cancelResearch()">中止</button>
+    
+    <div class="events" id="events"></div>
+    
+    <script>
+    let abortController = null;
+    
+    async function askAgent() {
+        const question = document.getElementById('question').value;
+        const eventsDiv = document.getElementById('events');
+        const btn = document.getElementById('ask-btn');
+        
+        if (!question) return;
+        
+        eventsDiv.innerHTML = '';
+        btn.disabled = true;
+        btn.textContent = '研究中...';
+        
+        // ★ AbortController：用户点击"取消"时能中断请求
+        abortController = new AbortController();
+        
+        try {
+            const response = await fetch('/v1/research/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question }),
+                signal: abortController.signal,
+            });
+            
+            // ★ 关键：流式读取响应
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                buffer += decoder.decode(value, { stream: true });
+                
+                // SSE 事件以空行分隔
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop(); // 最后一个可能不完整，保留
+                
+                for (const part of parts) {
+                    if (!part.trim()) continue;
+                    handleSSEEvent(part);
+                }
+            }
+        } catch (e) {
+            if (e.name !== 'AbortError') {
+                console.error(e);
+                addEvent('error', { message: e.message });
+            }
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '开始研究';
+        }
+    }
+    
+    function handleSSEEvent(rawEvent) {
+        const lines = rawEvent.split('\n');
+        let eventType = 'message';
+        let dataLines = [];
+        
+        for (const line of lines) {
+            if (line.startsWith('event:')) {
+                eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+                dataLines.push(line.slice(5).trim());
+            }
+        }
+        
+        const dataStr = dataLines.join('\n');
+        if (dataStr === '[DONE]') return;
+        
+        let data;
+        try {
+            data = JSON.parse(dataStr);
+        } catch {
+            data = { content: dataStr };
+        }
+        
+        addEvent(eventType, data);
+    }
+    
+    function addEvent(type, data) {
+        const eventsDiv = document.getElementById('events');
+        const div = document.createElement('div');
+        div.className = `event event-${type}`;
+        
+        let content = '';
+        if (type === 'thought') {
+            content = `💭 ${data.content || ''}`;
+        } else if (type === 'tool_call') {
+            content = `🔧 ${data.tool_name}(${JSON.stringify(data.tool_args)})`;
+        } else if (type === 'tool_result') {
+            content = `📋 ${data.success ? '✅' : '❌'} ${data.tool_name}\n${data.result_preview || ''}`;
+        } else if (type === 'answer_complete') {
+            content = `📝 最终答案:\n${data.answer || ''}`;
+        } else if (type === 'error') {
+            content = `❌ ${data.message || JSON.stringify(data)}`;
+        } else {
+            content = JSON.stringify(data);
+        }
+        
+        div.innerHTML = `
+            <div class="event-type">${type}</div>
+            <div class="event-content"><pre>${escapeHtml(content)}</pre></div>
+        `;
+        eventsDiv.appendChild(div);
+        eventsDiv.scrollTop = eventsDiv.scrollHeight;
+    }
+    function cancelResearch() {
+        if (abortController) {
+            abortController.abort();
+            addEvent('error', { message: '用户主动中止研究' });
+        }
+    }
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    </script>
+</body>
+</html>

@@ -62,6 +62,8 @@ default_approver = CLIApprover()
 # ===== 安全执行器 =====
 # 在 shared/safety.py 里改 safe_execute
 def safe_execute(metadata, tool_args, approver=default_approver, agent_reasoning=""):
+    from shared.rate_limiter import tracker
+    from shared.agent_errors import ToolRateLimit
     from shared.audit_log import audit
     import time
     
@@ -69,6 +71,13 @@ def safe_execute(metadata, tool_args, approver=default_approver, agent_reasoning
     approved = None
     error_msg = ""
     result = ""
+
+    # ★ 新增：在执行前做限流检查
+    if not tracker.record(metadata.name):
+        raise ToolRateLimit(
+            f"Tool {metadata.name} rate limit exceeded",
+            retry_after=60.0,
+        )
     
     try:
         if metadata.danger_level == DangerLevel.BLACK:

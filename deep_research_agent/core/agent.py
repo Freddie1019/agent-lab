@@ -7,11 +7,17 @@ ResearchAgent：深度研究 Agent 主类
 - 错误处理 + HITL + 审计（Day 6）
 """
 
+from email import message
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import json
 import time
 from typing import Optional
+
+import asyncio
+import json
+from typing import AsyncIterator
+from deep_research_agent.core.events import AgentEvent
 
 from shared.llm_client import client, DEFAULT_MODEL
 from shared.context_manager import ContextManager
@@ -199,4 +205,126 @@ class ResearchAgent:
         
         return report    
 
+    async def stream_with_history(
+            self, 
+            messages: list[dict]
+        ) -> AsyncIterator[AgentEvent]:
+        """
+        带历史的流式 Agent
 
+        Args:
+            messages: 已经包含 system + 历史对话 + 当前 user 的完整 message
+        """
+
+        # ===== 开始事件 =====
+        yield AgentEvent(
+            type="agent_start",
+            data={"messages_count": len(messages)},
+        )
+
+        # messages = [
+        #     {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
+        #     {"role": "user", "content": question},
+        # ]
+        
+        for step in range(1, self.max_steps + 1):
+            yield AgentEvent(type="step_start", step=step, data={"step": step})
+
+            try:
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=RESEARCH_TOOLS_SCHEMA,
+                    temperature=0,
+                )
+            except Exception as e:
+                err = classify_exception(e)
+                yield AgentEvent(
+                    type="error",
+                    step=step,
+                    data={"error_type": "llm_failure", "message": err.to_llm_message()},
+                )
+                return
+            
+            msg = response.choices[0].message
+            finish_reason = response.choices[0].finish_reason
+            messages.append(msg)
+
+            # 思考事件
+            if msg.content:
+                yield AgentEvent(
+                    type="thought",
+                    step=step,
+                    data={"content": msg.content},
+                )
+            
+            # 完成
+            if finish_reason == "stop":
+                yield AgentEvent(
+                    type="answer_complete",
+                    step=step,
+                    data={"answer": msg.content or ""},
+                )
+                yield AgentEvent(
+                    type="agent_complete",
+                    step=step,
+                    data={"status": "success", "total_steps": step},
+                )
+                return
+            
+            # 工具调用
+            if finish_reason == "tool_calls":
+                for tc in msg.tool_calls:
+                    tool_name = tc.function.name
+                    tool_args = json.loads(tc.function.arguments)
+                    
+                    # 事件 1：通知客户端我要调工具了
+                    yield AgentEvent(
+                        type="tool_call",
+                        step=step,
+                        data={"tool_name": tool_name, "tool_args": tool_args},
+                    )
+                    
+                    # 实际调用
+                    metadata = get_tool_by_name(tool_name)
+                    if metadata is None:
+                        result = f"未知工具: {tool_name}"
+                        success = False
+                    else:
+                        try:
+                            result = safe_execute(
+                                metadata=metadata,
+                                tool_args=tool_args,
+                                approver=self.approver,
+                            )
+                            success = True
+                        except AgentError as e:
+                            result = e.to_llm_message()
+                            success = False
+                        except Exception as e:
+                            result = classify_exception(e).to_llm_message()
+                            success = False
+                    
+                    # 事件 2：返回工具结果
+                    yield AgentEvent(
+                        type="tool_result",
+                        step=step,
+                        data={
+                            "tool_name": tool_name,
+                            "success": success,
+                            "result_preview": str(result)[:300],
+                        },
+                    )
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": str(result),
+                    })
+                continue
+        
+        # 走到这里说明 max_steps 用完
+        yield AgentEvent(
+            type="agent_complete",
+            data={"status": "max_steps", "total_steps": self.max_steps},
+        )
