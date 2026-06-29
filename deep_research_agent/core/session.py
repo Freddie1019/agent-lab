@@ -16,6 +16,10 @@ class Message(BaseModel):
     tool_call_id: Optional[str] = None
     created_at:  datetime = Field(default_factory=datetime.now)
 
+    # 新增 Day12
+    status: Literal["complete", "interrupted", "failed"] = "complete"
+    error_detail: Optional[str] = None
+
 class Session(BaseModel):
     """ 一个对话会话 """
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

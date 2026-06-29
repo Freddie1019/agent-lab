@@ -7,23 +7,26 @@ ResearchAgent：深度研究 Agent 主类
 - 错误处理 + HITL + 审计（Day 6）
 """
 
-from email import message
+
+from itertools import accumulate
+from nt import error
 import os, sys
+
+from openai import max_retries
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import json
 import time
-from typing import Optional
 
 import asyncio
 import json
-from typing import AsyncIterator
-from deep_research_agent.core.events import AgentEvent
+from typing import AsyncIterator, Optional
+from deep_research_agent.core.events import AgentEvent, agent_error_to_event, make_error_event
 
 from shared.llm_client import client, DEFAULT_MODEL
 from shared.context_manager import ContextManager
 from shared.token_counter import count_messages_tokens
 from shared.safety import safe_execute, CLIApprover
-from shared.agent_errors import AgentError, classify_exception
+from shared.agent_errors import AgentError, classify_exception, ToolTimeout, ToolUnavailable
 from shared.audit_log import audit
 
 from deep_research_agent.core.prompts import RESEARCH_SYSTEM_PROMPT
@@ -50,6 +53,7 @@ class ResearchAgent:
         max_context_tokens: int = 8000,
         context_strategy: str = "sliding_window",
         verbose: bool = True,
+        auto_retry_recoverable: bool = True
     ):
         self.model = model
         self.max_steps = max_steps
@@ -63,10 +67,44 @@ class ResearchAgent:
         )
 
         self.approver= CLIApprover()
+        self.auto_retry_recoverable = auto_retry_recoverable
     
     def _log(self, msg: str):
         if self.verbose:
             print(msg)
+    
+    async def _execute_tool_with_retry(
+        self,
+        metadata,
+        tool_args: dict,
+        step: int,
+        max_retries: int = 1,
+    ):
+        """ 带自动重试的工具执行 """
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = safe_execute(
+                    metadata=metadata,
+                    tool_args=tool_args,
+                    approver=self.approver,
+                )
+                return ("success", result, None)
+            except (ToolTimeout, ToolUnavailable) as e:
+                last_error = e
+                if attempt < max_retries:
+                    # 可恢复错误，等一下再试
+                    await asyncio.sleep(2 ** attempt)  # 指数退避
+                    continue
+                return ("error_retried_fail", None, e)
+            except AgentError as e:
+                # 不可恢复错误，直接失败
+                return ("error_no_retry", None, e)
+            except Exception as e:
+                err = classify_exception(e)
+                return ("error_no_retry", None, err)
+        
+        return ("error_retried_fail", None, last_error)
     
     def run(self, question: str) -> RunReport:
         "执行一次研究任务，返回完整报告"
@@ -210,10 +248,7 @@ class ResearchAgent:
             messages: list[dict]
         ) -> AsyncIterator[AgentEvent]:
         """
-        带历史的流式 Agent
-
-        Args:
-            messages: 已经包含 system + 历史对话 + 当前 user 的完整 message
+        流式 Agent v2: 增强错误处理
         """
 
         # ===== 开始事件 =====
@@ -221,12 +256,9 @@ class ResearchAgent:
             type="agent_start",
             data={"messages_count": len(messages)},
         )
-
-        # messages = [
-        #     {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
-        #     {"role": "user", "content": question},
-        # ]
         
+        accumulated_answer= "" # 累计已生成的内容，错误时返回给客户端
+
         for step in range(1, self.max_steps + 1):
             yield AgentEvent(type="step_start", step=step, data={"step": step})
 
@@ -239,12 +271,12 @@ class ResearchAgent:
                 )
             except Exception as e:
                 err = classify_exception(e)
-                yield AgentEvent(
-                    type="error",
+                yield agent_error_to_event(
+                    err,
                     step=step,
-                    data={"error_type": "llm_failure", "message": err.to_llm_message()},
+                    accumulated_content=accumulated_answer or None,
                 )
-                return
+                return  # 流终止
             
             msg = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
@@ -252,6 +284,7 @@ class ResearchAgent:
 
             # 思考事件
             if msg.content:
+                accumulated_answer = msg.content
                 yield AgentEvent(
                     type="thought",
                     step=step,
@@ -287,6 +320,12 @@ class ResearchAgent:
                     
                     # 实际调用
                     metadata = get_tool_by_name(tool_name)
+
+                    # if self.auto_retry_recoverable:
+                    #     status, result, error = await self._execute_tool_with_retry(
+                    #         metadata, tool_args, step, max_retries=1,
+                    #     )
+                    # else:
                     if metadata is None:
                         result = f"未知工具: {tool_name}"
                         success = False
@@ -299,10 +338,24 @@ class ResearchAgent:
                             )
                             success = True
                         except AgentError as e:
+                            # ★ 双向通知：客户端 + LLM
+                            # 1. 推送错误事件给客户端
+                            yield agent_error_to_event(
+                                e, step=step,
+                                tool_name=tool_name,
+                                accumulated_content=accumulated_answer or None
+                            )
+                            # 2. 把错误也传给 LLM （让它决定要不要换策略）
                             result = e.to_llm_message()
                             success = False
                         except Exception as e:
-                            result = classify_exception(e).to_llm_message()
+                            err = classify_exception(e)
+                            yield agent_error_to_event(
+                                e, step=step,
+                                tool_name=tool_name,
+                                accumulated_content=accumulated_answer or None
+                            )
+                            result = err.to_llm_message()
                             success = False
                     
                     # 事件 2：返回工具结果
@@ -322,9 +375,27 @@ class ResearchAgent:
                         "content": str(result),
                     })
                 continue
+
+            # ===== 异常 finish_reason =====
+            yield make_error_event(
+                type="abnormal_finish",
+                title="Abnormal Finish Reason",
+                detail=f"finish_reason={finish_reason}",
+                user_message=f"LLM 返回了非预期的状态: {finish_reason}",
+                step=step,
+                recoverable=False,
+                accumulated_content=accumulated_answer or None,
+            )
+            return
         
-        # 走到这里说明 max_steps 用完
-        yield AgentEvent(
-            type="agent_complete",
-            data={"status": "max_steps", "total_steps": self.max_steps},
+        # ===== max_steps 用完 =====
+        yield make_error_event(
+            type="max_steps_exceeded",
+            title="Max Steps Exceeded",
+            detail=f"Agent 达到最大步数 {self.max_steps}",
+            user_message="研究步骤太多，已自动停止。请尝试更具体的问题。",
+            step=self.max_steps,
+            severity="warning",
+            recoverable=False,
+            accumulated_content=accumulated_answer or None,
         )

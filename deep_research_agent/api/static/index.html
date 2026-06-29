@@ -56,6 +56,59 @@
         .event-type { font-size: 12px; color: #666; text-transform: uppercase; }
         .event-content { margin-top: 6px; }
         .event pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin: 0; }
+        .event-error {
+            border-color: #ef4444;
+            background: #fef2f2;
+        }
+        .event.severity-warning {
+            border-color: #f59e0b;
+            background: #fffbeb;
+        }
+        .error-card {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+        .error-icon { font-size: 24px; }
+        .error-content { flex: 1; }
+        .error-title {
+            font-weight: bold;
+            color: #b91c1c;
+            margin-bottom: 4px;
+        }
+        .severity-warning .error-title { color: #b45309; }
+        .error-message { color: #7f1d1d; margin-bottom: 8px; }
+        .error-detail {
+            font-size: 12px;
+            color: #991b1b;
+            background: rgba(0,0,0,0.05);
+            padding: 6px 8px;
+            border-radius: 4px;
+            margin-top: 6px;
+        }
+        .error-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 8px;
+        }
+        .error-action-btn {
+            padding: 6px 12px;
+            font-size: 13px;
+            border: 1px solid #dc2626;
+            background: white;
+            color: #dc2626;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .error-action-btn:hover {
+            background: #dc2626;
+            color: white;
+        }
+        .retry-countdown {
+            font-size: 12px;
+            color: #6b7280;
+            margin-left: 8px;
+        }
     </style>
 </head>
 <body>
@@ -152,6 +205,10 @@
     }
     
     function addEvent(type, data) {
+        if (type === 'error'){
+            addErrorEvent(data);
+            return;
+        }
         const eventsDiv = document.getElementById('events');
         const div = document.createElement('div');
         div.className = `event event-${type}`;
@@ -188,6 +245,84 @@
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+    function addErrorEvent(errorData) {
+        const eventsDiv = document.getElementById('events');
+        const div = document.createElement('div');
+        
+        const severity = errorData.severity || 'error';
+        div.className = `event event-error severity-${severity}`;
+        
+        const icon = severity === 'warning' ? '⚠️' : '❌';
+        
+        // 已生成内容
+        let accumulatedHtml = '';
+        if (errorData.accumulated_content) {
+            accumulatedHtml = `
+                <div class="error-detail">
+                    <strong>挂之前已生成的内容:</strong><br>
+                    ${escapeHtml(errorData.accumulated_content)}
+                </div>
+            `;
+        }
+        
+        // 操作按钮
+        let actionsHtml = '';
+        let countdownId = null;
+        
+        if (errorData.recoverable) {
+            let countdownText = '';
+            if (errorData.retry_after) {
+                countdownText = `<span class="retry-countdown" id="countdown-${Date.now()}">${errorData.retry_after}秒后自动重试</span>`;
+            }
+            actionsHtml = `
+                <div class="error-actions">
+                    <button class="error-action-btn" onclick="retryRequest()">🔄 立即重试</button>
+                    ${countdownText}
+                </div>
+            `;
+        }
+        
+        div.innerHTML = `
+            <div class="error-card">
+                <div class="error-icon">${icon}</div>
+                <div class="error-content">
+                    <div class="error-title">${escapeHtml(errorData.title || 'Error')}</div>
+                    <div class="error-message">${escapeHtml(errorData.user_message || '出错了')}</div>
+                    <div class="error-detail">
+                        类型: ${errorData.type || 'unknown'}
+                        ${errorData.step ? ` · 第 ${errorData.step} 步` : ''}
+                        ${errorData.tool_name ? ` · 工具: ${errorData.tool_name}` : ''}
+                    </div>
+                    ${accumulatedHtml}
+                    ${actionsHtml}
+                </div>
+            </div>
+        `;
+        
+        eventsDiv.appendChild(div);
+        eventsDiv.scrollTop = eventsDiv.scrollHeight;
+        
+        // 自动重试倒计时
+        if (errorData.recoverable && errorData.retry_after) {
+            let remaining = errorData.retry_after;
+            const countdownEl = div.querySelector('.retry-countdown');
+            const timer = setInterval(() => {
+                remaining--;
+                if (countdownEl) {
+                    countdownEl.textContent = `${remaining}秒后自动重试`;
+                }
+                if (remaining <= 0) {
+                    clearInterval(timer);
+                    if (countdownEl) countdownEl.textContent = '正在重试...';
+                    retryRequest();
+                }
+            }, 1000);
+        }
+    }
+    function retryRequest() {
+        // 复用现有的提问逻辑
+        askAgent();
     }
     </script>
 </body>

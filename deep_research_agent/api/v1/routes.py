@@ -1,7 +1,9 @@
 """
 API v1 路由
 """
+import json
 import asyncio
+from itertools import accumulate
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -15,7 +17,7 @@ from deep_research_agent.api.schemas.v1 import ResearchRequest, ResearchResponse
 
 from deep_research_agent.core.session_store import session_store
 from deep_research_agent.core.session import Message
-from deep_research_agent.core.events import AgentEvent
+from deep_research_agent.core.events import AgentEvent, make_error_event
 
 # tracker.set_limit("web_search", 0)
 class ChatInSessionRequest(BaseModel):
@@ -134,8 +136,11 @@ async def chat_in_session_stream(
     async def event_generator():
         async with lock:
             session.is_processing = True
-
+            
+            # 新增状态变量 Day12
             collected_assistant_msg = ""
+            last_error_data: Optional[dict] = None
+            completed_normally = False
 
             try:
                 # ★ 调用 Agent 时把历史传进去
@@ -146,34 +151,48 @@ async def chat_in_session_stream(
                     if await raw_request.is_disconnected():
                         print(f"Client disconnected, cancelling session {session_id}")
                         break
-                
-                    # 收集最终答案
-                    if event.type == "answer_complete":
-                        collected_assistant_msg = event.data.get("answer", "")
+                    
+                    # Day12 新增 累计内容 （不论是 thought 还是 answer）
+                    if event.type == "thought":
+                        accumulated_content = event.data.get("content", "")
+                    elif event.type == "answer_complete":
+                        accumulated_content = event.data.get("answer", "")
+                    
+                    # 记录最后一次错误
+                    if event.type == "error":
+                        last_error_data = event.data
+                    
+
+                    # 标记正常完成
+                    if event.type == "agent_complete":
+                        if event.data.get("status") == "success":
+                            completed_normally = True
                     
                     yield event.to_sse()
-                
-                # ★ 流式完成后，持久化新增消息
-                if collected_assistant_msg:
-                    await session_store.append_messages(
-                        session_id=session_id,
-                        user_id=user_id,
-                        messages=[
-                            Message(role="user", content=request.question),
-                            Message(role="assistant", content=collected_assistant_msg),
-                        ],
-                    )
                 
                 yield "event: done\ndata: [DONE]\n\n"
 
             except Exception as e:
-                err_event = AgentEvent(
-                    type="error",
-                    data={"message": str(e)},
+                # event_generator 自己挂了 （极少见）
+                err_event = make_error_event(
+                    type="internal_error",
+                    title="Internal Server Error",
+                    detail=str(e),
+                    user_message="服务内部错误，请重试",
+                    accumulated_content=accumulated_content or None
                 )
                 yield err_event.to_sse()
             
             finally:
+                # 关键：无论如何都持久化
+                await _persist_session_messages(
+                    session_id=session_id,
+                    user_id=user_id,
+                    user_question=request.question,
+                    accumulated_content=accumulated_content,
+                    completed_normally=completed_normally,
+                    last_error_data=last_error_data,
+                )
                 session.is_processing = False
     
     return StreamingResponse(
@@ -183,4 +202,47 @@ async def chat_in_session_stream(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+async def _persist_session_messages(
+    session_id: str,
+    user_id: str,
+    user_question: str,
+    accumulated_content: str,
+    completed_normally: bool,
+    last_error_data: Optional[dict],
+):
+    """智能持久化：根据流式结果决定怎么存"""
+    user_msg = Message(
+        role="user",
+        content=user_question,
+        status="complete",
+    )
+    if completed_normally and accumulated_content:
+        # 完整成功
+        assistant_msg = Message(
+            role="assistant",
+            content=accumulated_content,
+            status="complete",
+        )
+    elif accumulated_content:
+        # 部分成功（流中断或错误，但有内容）
+        assistant_msg = Message(
+            role="assistant",
+            content=accumulated_content,
+            status="interrupted",
+            error_detail=json.dumps(last_error_data) if last_error_data else "流中断",
+        )
+    else:
+        # 完全失败，没有任何 assistant 内容
+        assistant_msg = Message(
+            role="assistant",
+            content="[请求失败，未能生成回答]",
+            status="failed",
+            error_detail=json.dumps(last_error_data) if last_error_data else "未知错误",
+        )
+    await session_store.append_messages(
+        session_id=session_id,
+        user_id=user_id,
+        messages=[user_msg, assistant_msg],
     )
