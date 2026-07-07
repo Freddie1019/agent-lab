@@ -351,7 +351,7 @@ class ResearchAgent:
                         except Exception as e:
                             err = classify_exception(e)
                             yield agent_error_to_event(
-                                e, step=step,
+                                err, step=step,
                                 tool_name=tool_name,
                                 accumulated_content=accumulated_answer or None
                             )

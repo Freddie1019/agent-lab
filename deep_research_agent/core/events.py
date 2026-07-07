@@ -2,7 +2,6 @@
 Agent 流式事件类型定义
 v2: 增强错误事件
 """
-import json
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from pydantic import BaseModel
@@ -99,7 +98,7 @@ def agent_error_to_event(
     step: int = 0,
     accumulated_content: Optional[str] = None,
     tool_name: Optional[str] = None,
-) -> AgentError:
+) -> AgentEvent:
     """把 AgentError 转换成 SSE 错误事件"""
 
     # 根据 AgentError 类型决定语义

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -48,6 +48,30 @@ def _make_error_response(
 
 def register_error_handlers(app: FastAPI):
     """注册所有错误处理器"""
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        detail = exc.detail
+
+        if isinstance(detail, dict):
+            error_type = detail.get("error_type", "http-error")
+            title = detail.get("title", exc.__class__.__name__)
+            message = detail.get("detail", str(detail))
+            errors = detail.get("errors")
+        else:
+            error_type = "http-error"
+            title = exc.__class__.__name__
+            message = str(detail)
+            errors = None
+
+        return _make_error_response(
+            status_code=exc.status_code,
+            error_type=error_type,
+            title=title,
+            detail=message,
+            instance=str(request.url.path),
+            errors=errors,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError):

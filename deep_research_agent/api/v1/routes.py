@@ -138,7 +138,8 @@ async def chat_in_session_stream(
             session.is_processing = True
             
             # 新增状态变量 Day12
-            collected_assistant_msg = ""
+            process_fragments: list[str] = []  # 多步过程内容，仅用于中断时兜底
+            collected_assistant_msg = ""      # 仅 answer_complete 的答案，用于持久化
             last_error_data: Optional[dict] = None
             completed_normally = False
 
@@ -152,17 +153,19 @@ async def chat_in_session_stream(
                         print(f"Client disconnected, cancelling session {session_id}")
                         break
                     
-                    # Day12 新增 累计内容 （不论是 thought 还是 answer）
+                    # Day12: 分别维护"过程内容"和"最终回答"
+                    # thought 是推理过程，不应直接当作最终回答持久化
                     if event.type == "thought":
-                        accumulated_content = event.data.get("content", "")
+                        content = event.data.get("content", "")
+                        if content:
+                            process_fragments.append(content)
                     elif event.type == "answer_complete":
-                        accumulated_content = event.data.get("answer", "")
+                        collected_assistant_msg = event.data.get("answer", "")
                     
                     # 记录最后一次错误
                     if event.type == "error":
                         last_error_data = event.data
                     
-
                     # 标记正常完成
                     if event.type == "agent_complete":
                         if event.data.get("status") == "success":
@@ -174,6 +177,7 @@ async def chat_in_session_stream(
 
             except Exception as e:
                 # event_generator 自己挂了 （极少见）
+                accumulated_content = "\n\n".join(process_fragments)
                 err_event = make_error_event(
                     type="internal_error",
                     title="Internal Server Error",
@@ -185,6 +189,10 @@ async def chat_in_session_stream(
             
             finally:
                 # 关键：无论如何都持久化
+                # 优先保存 answer_complete 的答案；若没有则用过程内容兜底
+                accumulated_content = (
+                    collected_assistant_msg or "\n\n".join(process_fragments)
+                )
                 await _persist_session_messages(
                     session_id=session_id,
                     user_id=user_id,

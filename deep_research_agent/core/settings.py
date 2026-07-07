@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=10, ge=1)
     max_concurrent_agents: int = Field(default=5, ge=1, le=100)
 
+    # === Day13 JWT 配置 ===
+    JWT_SECRET_KEY: str = "dev-secret-change-me"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
 # 全局单例
 _settings: Settings | None = None
 
