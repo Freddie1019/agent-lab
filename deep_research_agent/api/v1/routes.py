@@ -5,9 +5,8 @@ import json
 import asyncio
 from itertools import accumulate
 from typing import Optional
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
-from fastapi import Request
 from shared.rate_limiter import tracker
 from fastapi.responses import StreamingResponse
 from deep_research_agent.core.events import AgentEvent
@@ -18,6 +17,8 @@ from deep_research_agent.api.schemas.v1 import ResearchRequest, ResearchResponse
 from deep_research_agent.core.session_store import session_store
 from deep_research_agent.core.session import Message
 from deep_research_agent.core.events import AgentEvent, make_error_event
+
+from deep_research_agent.api.auth import CurrentUser, get_current_user
 
 # tracker.set_limit("web_search", 0)
 class ChatInSessionRequest(BaseModel):
@@ -112,11 +113,11 @@ async def chat_in_session_stream(
     session_id: str,
     request: ChatInSessionRequest,
     raw_request: Request,
-    user_id: str = Header(..., alias="X-User-ID"),
+    current_user: CurrentUser = Depends(get_current_user)
 ):
     """在指定会话中流式提问"""
     # 1. 校验所有权
-    session = await session_store.get(session_id, user_id)
+    session = await session_store.get(session_id, current_user.user_id)
 
     # 2. 检查会话锁（防并发）
     lock = session_store.get_lock(session_id)
@@ -195,7 +196,7 @@ async def chat_in_session_stream(
                 )
                 await _persist_session_messages(
                     session_id=session_id,
-                    user_id=user_id,
+                    user_id=current_user.user_id,
                     user_question=request.question,
                     accumulated_content=accumulated_content,
                     completed_normally=completed_normally,

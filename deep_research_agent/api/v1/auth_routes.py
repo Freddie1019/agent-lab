@@ -1,7 +1,6 @@
-from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-
-from deep_research_agent.api.auth import create_access_token
+from fastapi import APIRouter, HTTPException, status, Depends
+from deep_research_agent.api.auth import create_access_token, CurrentUser, get_current_user
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
@@ -59,3 +58,10 @@ async def login(request: LoginRequest) -> LoginResponse:
     )
 
     return LoginResponse(access_token=token)
+
+@router.get("/me", response_model=CurrentUser)
+async def get_me(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """Get current authenticated user info."""
+    return current_user

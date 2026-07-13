@@ -6,16 +6,13 @@
 - DELETE /v1/sessions/{id} 删除会话
 """
 from datetime import datetime
-from email import message
-from turtle import title
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from requests import session
 
-from deep_research_agent.api.v1.routes import router
 from deep_research_agent.core.session_store import session_store
-from deep_research_agent.core.session import Session, Message
+from deep_research_agent.core.session import Message
+from deep_research_agent.api.auth import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
@@ -43,10 +40,10 @@ class SessionDetail(BaseModel):
 @router.post("", response_model=SessionDetail)
 async def create_session(
     request: CreateSessionRequest,
-    user_id: str = Header(..., alias="X-User-ID"),
+    current_user: CurrentUser = Depends(get_current_user)
 ):
     """创建新会话"""
-    session = await session_store.create(user_id=user_id, title=request.title)
+    session = await session_store.create(user_id=current_user.user_id, title=request.title)
     return SessionDetail(
         id=session.id,
         title=session.title,
@@ -57,11 +54,11 @@ async def create_session(
 
 @router.get("", response_model=list[SessionSummary])
 async def list_sessions(
-    user_id: str = Header(..., alias="X-User-ID"),
+    current_user: CurrentUser = Depends(get_current_user),
     limit: int = 50,
 ):
     """列出当前用户的所有会话"""
-    sessions = await session_store.list_by_user(user_id, limit=limit)
+    sessions = await session_store.list_by_user(current_user.user_id, limit=limit)
     return [
         SessionSummary(
             id=s.id,
@@ -76,10 +73,10 @@ async def list_sessions(
 @router.get("/{session_id}", response_model=SessionDetail)
 async def get_session(
     session_id: str,
-    user_id: str = Header(..., alias="X-User-ID"),
+    current_user: CurrentUser = Depends(get_current_user)
 ):
     """获取会话详情（含完整对话历史）"""
-    session = await session_store.get(session_id, user_id)
+    session = await session_store.get(session_id, current_user.user_id)
     return SessionDetail(
         id=session.id,
         title=session.title,
@@ -91,8 +88,8 @@ async def get_session(
 @router.delete("/{session_id}")
 async def delete_session(
     session_id: str,
-    user_id: str = Header(..., alias="X-User-ID"),
+    current_user: CurrentUser = Depends(get_current_user)
 ):
     """删除会话"""
-    await session_store.delete(session_id, user_id)
+    await session_store.delete(session_id, current_user.user_id)
     return {"session_id": session_id, "status": "deleted"}
