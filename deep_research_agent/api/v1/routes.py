@@ -20,6 +20,9 @@ from deep_research_agent.core.events import AgentEvent, make_error_event
 
 from deep_research_agent.api.auth import CurrentUser, get_current_user
 
+# 添加 run 存储
+from deep_research_agent.core.run_store import run_store
+
 # tracker.set_limit("web_search", 0)
 class ChatInSessionRequest(BaseModel):
     """ 在某个会话中追加一条消息 """
@@ -128,7 +131,16 @@ async def chat_in_session_stream(
     history = session.to_llm_messages()
     history.append({"role": "user", "content": request.question})
 
-    # 4. 创建 Agent
+    # 4. 创建 AgentRun
+    run = await run_store.create(
+        session_id=session_id,
+        user_id=current_user.user_id,
+        metadata={
+            "question": request.question,
+            "entrypoint": "chat_stream",
+        },
+    )
+    # 5. 创建 Agent
     agent = ResearchAgent(
         max_steps=request.max_steps,
         verbose=False,
@@ -145,15 +157,46 @@ async def chat_in_session_stream(
             completed_normally = False
 
             try:
+                # 先告诉客户端 run_id
+                run_created = AgentEvent(
+                    type="agent_start",
+                    data={
+                        "run_id": run.id,
+                        "session_id": session_id,
+                        "message": "Agent run created",
+                    },
+                )
+
+                await run_store.update_from_event(
+                    run_id=run.id,
+                    event_type=run_created.type,
+                    step=run_created.step,
+                    data=run_created.data,
+                )
+
+                yield run_created.to_sse()
+
                 # ★ 调用 Agent 时把历史传进去
                 async for event in agent.stream_with_history(
                     messages=history,
                 ):
 
                     if await raw_request.is_disconnected():
+                        await run_store.mark_interrupted(
+                            run_id=run.id,
+                            reason="client_disconnected",
+                        )
                         print(f"Client disconnected, cancelling session {session_id}")
                         break
                     
+                    # 根据 event 更新 run
+                    await run_store.update_from_event(
+                        run_id=run.id,
+                        event_type=event.type,
+                        step=event.step,
+                        data=event.data
+                    )
+
                     # Day12: 分别维护"过程内容"和"最终回答"
                     # thought 是推理过程，不应直接当作最终回答持久化
                     if event.type == "thought":
@@ -178,6 +221,14 @@ async def chat_in_session_stream(
 
             except Exception as e:
                 # event_generator 自己挂了 （极少见）
+
+                await run_store.mark_failed(
+                    run_id=run.id,
+                    error_type="internal_error",
+                    error_detail=str(e),
+                    error_user_message="服务内部错误，请稍后重试",
+                )
+
                 accumulated_content = "\n\n".join(process_fragments)
                 err_event = make_error_event(
                     type="internal_error",
@@ -191,6 +242,31 @@ async def chat_in_session_stream(
             finally:
                 # 关键：无论如何都持久化
                 # 优先保存 answer_complete 的答案；若没有则用过程内容兜底
+
+                latest_run = await run_store.get(run.id, user_id=current_user.user_id)
+
+                if (
+                    latest_run.status.value
+                    not in {"completed", "failed", "interrupted", "cancelled"}
+                ):
+                    if completed_normally:
+                        await run_store.mark_completed(run.id)
+                    elif last_error_data:
+                        await run_store.mark_failed(
+                            run_id=run.id,
+                            error_type=last_error_data.get("type", "stream_error"),
+                            error_detail=json.dumps(
+                                last_error_data,
+                                ensure_ascii=False,
+                            ),
+                            error_user_message=last_error_data.get("user_message"),
+                        )
+                    else:
+                        await run_store.mark_interrupted(
+                            run_id=run.id,
+                            reason="stream_finished_without_completion",
+                        )
+
                 accumulated_content = (
                     collected_assistant_msg or "\n\n".join(process_fragments)
                 )

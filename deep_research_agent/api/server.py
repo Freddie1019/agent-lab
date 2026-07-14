@@ -14,6 +14,9 @@ import os
 # 挂载 auth 路由
 from deep_research_agent.api.v1 import auth_routes
 
+# 挂载 run 路由
+from deep_research_agent.api.v1 import runs_routes
+
 app = FastAPI(
     title="Deep Research Agent API",
     version="0.2.0",  # ← 升级了版本
@@ -42,3 +45,6 @@ app.include_router(sessions_routes.router)
 
 # 挂载 auth 路由
 app.include_router(auth_routes.router)
+
+# 挂载 run 路由
+app.include_router(runs_routes.router)
