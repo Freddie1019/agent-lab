@@ -31,6 +31,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deep_research_agent.core.db.session import get_db_session
 from deep_research_agent.core.db.repositories import run_repo, trace_repo, session_repo
 
+async def _get_session_for_runtime(
+    session_id: str,
+    user_id: str,
+    db: AsyncSession,
+):
+    """
+    运行时获取 session
+
+    优先用内存 session_store
+    如果内存没有，则从数据库恢复
+    """
+    try:
+        return await session_store.get(session_id, user_id)
+    except Exception:
+        db_session_model = await session_repo.get_session(
+            db=db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+        if db_session_model is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Session not found"
+            )
+         # 恢复到内存，保证后续 to_llm_messages / lock 逻辑可用
+        # 这里根据你的 session_store 是否有 put/set 方法调整
+        if hasattr(session_store, "put"):
+            await session_store.put(db_session_model)
+        elif hasattr(session_store, "set"):
+            await session_store.set(db_session_model)
+        else:
+            # 如果没有 put/set，短期可以直接返回 db_session_model
+            # 但 lock 仍然使用 session_store.get_lock(session_id)
+            pass
+
+        return db_session_model
+
+
 # tracker.set_limit("web_search", 0)
 class ChatInSessionRequest(BaseModel):
     """ 在某个会话中追加一条消息 """
@@ -129,7 +168,11 @@ async def chat_in_session_stream(
 ):
     """在指定会话中流式提问"""
     # 1. 校验所有权
-    session = await session_store.get(session_id, current_user.user_id)
+    session = await _get_session_for_runtime(
+        session_id=session_id, 
+        user_id=current_user.user_id,
+        db=db,
+    )
 
     await session_repo.upsert_session(db, session)
 
@@ -214,7 +257,7 @@ async def chat_in_session_stream(
                     await run_repo.upsert_run(db, updated_run)
 
                     # 2. 记录 RunStep / ToolCallRecord
-                    step = await run_trace_store.record_event(
+                    trace_result = await run_trace_store.record_event(
                         run_id=run.id,
                         session_id=session_id,
                         user_id=current_user.user_id,
@@ -222,8 +265,21 @@ async def chat_in_session_stream(
                         step_index=event.step,
                         data=event.data,
                     )
-                    if step is not None:
-                        await trace_repo.add_step(db, step)
+                    if trace_result is not None:
+                        if trace_result.step is not None:
+                            await trace_repo.add_step(db, trace_result.step)
+
+                        if trace_result.tool_call_created is not None:
+                            await trace_repo.add_tool_call(
+                                db,
+                                trace_result.tool_call_created,
+                            )
+
+                        if trace_result.tool_call_updated is not None:
+                            await trace_repo.upsert_tool_call(
+                                db,
+                                trace_result.tool_call_updated,
+                            )
 
                     # Day12: 分别维护"过程内容"和"最终回答"
                     # thought 是推理过程，不应直接当作最终回答持久化

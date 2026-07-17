@@ -12,6 +12,14 @@ from deep_research_agent.core.run import AgentRun
 from deep_research_agent.core.run_trace import RunStep, ToolCallRecord
 from deep_research_agent.core.session import Message, Session
 
+from deep_research_agent.core.db.converters import (
+    orm_to_agent_run,
+    orm_to_message,
+    orm_to_run_step,
+    orm_to_session,
+    orm_to_tool_call_record,
+)
+
 class SessionRepository:
     async def upsert_session(
         self,
@@ -69,7 +77,50 @@ class SessionRepository:
             .where(MessageORM.user_id == user_id)
             .order_by(MessageORM.created_at)
         )
-        return list(result.scalar().all())
+        return list(result.scalars().all())
+    
+    async def get_session(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        user_id: str,
+    ) -> Session | None:
+        result = await db.execute(
+            select(SessionORM)
+            .where(SessionORM.id == session_id)
+            .where(SessionORM.user_id == user_id)
+        )
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+        
+        messages = await self.list_messages(
+            db=db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        return orm_to_session(
+            orm,
+            messages=[orm_to_message(m) for m in messages],
+        )
+
+    async def list_sessions(
+        self,
+        db: AsyncSession,
+        user_id: str,
+    ) -> list[Session]:
+        result = await db.execute(
+            select(SessionORM)
+            .where(SessionORM.user_id == user_id)
+            .order_by(SessionORM.updated_at.desc())
+        )
+
+        sessions = []
+        for orm in result.scalars().all():
+            sessions.append(orm_to_session(orm, messages=[]))
+
+        return sessions
 
 class RunRepository:
     async def upsert_run(
@@ -154,6 +205,35 @@ class RunRepository:
         orm.started_at = run.started_at
         orm.completed_at = run.completed_at
         orm.updated_at = run.updated_at
+    
+    async def get_run_model(
+        self,
+        db: AsyncSession,
+        run_id: str,
+        user_id: str,
+    ) -> AgentRun | None:
+        orm = await self.get_run(
+            db=db,
+            run_id=run_id,
+            user_id=user_id,
+        )
+        if orm is None:
+            return None
+        
+        return orm_to_agent_run(orm)
+    
+    async def list_run_models_by_session(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        user_id: str,
+    ) -> list[AgentRun]:
+        orms = await self.list_runs_by_session(
+            db=db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        return [orm_to_agent_run(orm) for orm in orms]
 
 
 class TraceRepository:
@@ -242,6 +322,59 @@ class TraceRepository:
             .order_by(ToolCallRecordORM.step_index, ToolCallRecordORM.created_at)
         )
         return list(result.scalars().all())
+
+    async def list_step_models(
+        self,
+        db: AsyncSession,
+        run_id: str,
+        user_id: str,
+    ) -> list[RunStep]:
+        orms = await self.list_steps(
+            db=db,
+            run_id=run_id,
+            user_id=user_id,
+        )
+        return [orm_to_run_step(orm) for orm in orms]
+    
+    async def list_tool_call_models(
+        self,
+        db: AsyncSession,
+        run_id: str,
+        user_id: str,
+    ) -> list[ToolCallRecord]:
+        orms = await self.list_tool_calls(
+            db=db,
+            run_id=run_id,
+            user_id=user_id,
+        )
+        return [orm_to_tool_call_record(orm) for orm in orms]
+    
+    async def upsert_tool_call(
+        self,
+        db: AsyncSession,
+        record: ToolCallRecord,
+    ) -> None:
+        existing = await db.get(ToolCallRecordORM, record.id)
+
+        if existing is None:
+            await self.add_tool_call(db, record)
+            return
+        
+        existing.status = record.status.value
+        existing.success = record.success
+        existing.result_preview = record.result_preview
+        existing.result_raw = record.result_raw
+        existing.error_type = record.error_type
+        existing.error_detail = record.error_detail
+        existing.is_dangerous = record.is_dangerous
+        existing.approval_required = record.approval_required
+        existing.approved = record.approved
+        existing.metadata_json = record.metadata
+        existing.completed_at = record.completed_at
+        existing.duration_ms = record.duration_ms
+
+        await db.commit()
+
 
 
 session_repo = SessionRepository()

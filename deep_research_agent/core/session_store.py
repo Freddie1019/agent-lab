@@ -66,6 +66,9 @@ class InMemorySessionStore:
         for msg in messages:
             session.add_message(msg)
         return session
+    
+    async def put(self, session: Session) -> None:
+        self._sessions[session.id] = session
 
     # ===== 并发控制 =====
     def get_lock(self, session_id: str) -> asyncio.Lock:

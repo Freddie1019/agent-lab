@@ -7,12 +7,17 @@
 """
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException,status
 from pydantic import BaseModel, Field
 
 from deep_research_agent.core.session_store import session_store
 from deep_research_agent.core.session import Message
 from deep_research_agent.api.auth import CurrentUser, get_current_user
+
+# 添加至 DB
+from sqlalchemy.ext.asyncio import AsyncSession
+from deep_research_agent.core.db.session import get_db_session
+from deep_research_agent.core.db.repositories import session_repo
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
@@ -52,38 +57,35 @@ async def create_session(
         updated_at=session.updated_at,
     )
 
-@router.get("", response_model=list[SessionSummary])
+@router.get("")
 async def list_sessions(
     current_user: CurrentUser = Depends(get_current_user),
-    limit: int = 50,
+    db: AsyncSession = Depends(get_db_session),
 ):
     """列出当前用户的所有会话"""
-    sessions = await session_store.list_by_user(current_user.user_id, limit=limit)
-    return [
-        SessionSummary(
-            id=s.id,
-            title=s.title,
-            message_count=len(s.messages),
-            created_at=s.created_at,
-            updated_at=s.updated_at,
-        )
-        for s in sessions
-    ]
+    return await session_repo.list_sessions(
+        db=db,
+        user_id=current_user.user_id
+    )
 
-@router.get("/{session_id}", response_model=SessionDetail)
+@router.get("/{session_id}")
 async def get_session(
     session_id: str,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """获取会话详情（含完整对话历史）"""
-    session = await session_store.get(session_id, current_user.user_id)
-    return SessionDetail(
-        id=session.id,
-        title=session.title,
-        messages=session.messages,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
+    session = await session_repo.get_session(
+        db=db,
+        session_id=session_id, 
+        user_id=current_user.user_id
     )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    return session
 
 @router.delete("/{session_id}")
 async def delete_session(
@@ -93,3 +95,23 @@ async def delete_session(
     """删除会话"""
     await session_store.delete(session_id, current_user.user_id)
     return {"session_id": session_id, "status": "deleted"}
+
+@router.get("/{session_id}/messages")
+async def list_session_messages(
+    session_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    session = await session_repo.get_session(
+        db=db,
+        session_id=session_id,
+        user_id=current_user.user_id,
+    )
+
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Session not found"
+        )
+
+    return session.messages

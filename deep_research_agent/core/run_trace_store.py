@@ -6,6 +6,12 @@ from deep_research_agent.core.run_trace import (
     RunStepStatus,
     ToolCallRecord,
 )
+from pydantic import BaseModel
+
+class TraceRecordResult(BaseModel):
+    step: Optional[RunStep] = None
+    tool_call_created: Optional[ToolCallRecord] = None
+    tool_call_updated: Optional[ToolCallRecord] = None
 
 class RunTraceStore:
     """
@@ -99,7 +105,7 @@ class RunTraceStore:
         event_type: str,
         step_index: int,
         data: dict,
-    ) -> Optional[RunStep]:
+    ) -> Optional[TraceRecordResult]:
         """
         根据 AgentEvent 记录 RunStep / ToolCallRecord。
         """
@@ -120,6 +126,8 @@ class RunTraceStore:
             raw_event_data=data,
         )
 
+        result = TraceRecordResult(step=step)
+
         if event_type == "error":
             step.mark_failed(
                 error_type=data.get("type", "unknown_error"),
@@ -130,22 +138,24 @@ class RunTraceStore:
 
         # 工具调用记录
         if event_type == "tool_call":
-            await self._record_tool_call(
+            record = await self._record_tool_call(
                 run_id=run_id,
                 session_id=session_id,
                 user_id=user_id,
                 step_index=step_index,
                 data=data,
             )
+            result.tool_call_created = record
 
         elif event_type == "tool_result":
-            await self._complete_tool_call(
+            record = await self._complete_tool_call(
                 run_id=run_id,
                 user_id=user_id,
                 data=data,
             )
+            result.tool_call_updated = record
 
-        return step
+        return result
 
     def _map_event_to_step_type(
         self,
@@ -208,7 +218,7 @@ class RunTraceStore:
         user_id: str,
         step_index: int,
         data: dict,
-    ) -> None:
+    ) -> ToolCallRecord:
         tool_name = (
             data.get("tool_name")
             or data.get("name")
@@ -233,6 +243,7 @@ class RunTraceStore:
         )
 
         await self.create_tool_call(record)
+        return record
 
     async def _complete_tool_call(
         self,
@@ -240,7 +251,7 @@ class RunTraceStore:
         run_id: str,
         user_id: str,
         data: dict,
-    ) -> None:
+    ) -> ToolCallRecord | None:
         tool_name = (
             data.get("tool_name")
             or data.get("name")
@@ -268,6 +279,7 @@ class RunTraceStore:
             )
 
         await self.update_tool_call(record)
+        return record
 
 
 run_trace_store = RunTraceStore()
