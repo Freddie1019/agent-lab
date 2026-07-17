@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
+    # 添加 DB 
+    DATABASE_URL: str = "sqlite+aiosqlite:///./data/agent_lab.db"
+
 # 全局单例
 _settings: Settings | None = None
 

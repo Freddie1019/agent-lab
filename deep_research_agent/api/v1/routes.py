@@ -23,6 +23,14 @@ from deep_research_agent.api.auth import CurrentUser, get_current_user
 # 添加 run 存储
 from deep_research_agent.core.run_store import run_store
 
+# 添加 run 追溯
+from deep_research_agent.core.run_trace_store import run_trace_store
+
+# 落库
+from sqlalchemy.ext.asyncio import AsyncSession
+from deep_research_agent.core.db.session import get_db_session
+from deep_research_agent.core.db.repositories import run_repo, trace_repo, session_repo
+
 # tracker.set_limit("web_search", 0)
 class ChatInSessionRequest(BaseModel):
     """ 在某个会话中追加一条消息 """
@@ -116,11 +124,14 @@ async def chat_in_session_stream(
     session_id: str,
     request: ChatInSessionRequest,
     raw_request: Request,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """在指定会话中流式提问"""
     # 1. 校验所有权
     session = await session_store.get(session_id, current_user.user_id)
+
+    await session_repo.upsert_session(db, session)
 
     # 2. 检查会话锁（防并发）
     lock = session_store.get_lock(session_id)
@@ -140,6 +151,8 @@ async def chat_in_session_stream(
             "entrypoint": "chat_stream",
         },
     )
+    await run_repo.upsert_run(db, run)
+
     # 5. 创建 Agent
     agent = ResearchAgent(
         max_steps=request.max_steps,
@@ -167,12 +180,13 @@ async def chat_in_session_stream(
                     },
                 )
 
-                await run_store.update_from_event(
+                updated_run = await run_store.update_from_event(
                     run_id=run.id,
                     event_type=run_created.type,
                     step=run_created.step,
                     data=run_created.data,
                 )
+                await run_repo.upsert_run(db, updated_run)
 
                 yield run_created.to_sse()
 
@@ -182,20 +196,34 @@ async def chat_in_session_stream(
                 ):
 
                     if await raw_request.is_disconnected():
-                        await run_store.mark_interrupted(
+                        interrupted_run = await run_store.mark_interrupted(
                             run_id=run.id,
                             reason="client_disconnected",
                         )
+                        await run_repo.upsert_run(db, interrupted_run)
                         print(f"Client disconnected, cancelling session {session_id}")
                         break
                     
-                    # 根据 event 更新 run
-                    await run_store.update_from_event(
+                    # 1. 根据 event 更新 run 整体状态
+                    updated_run = await run_store.update_from_event(
                         run_id=run.id,
                         event_type=event.type,
                         step=event.step,
                         data=event.data
                     )
+                    await run_repo.upsert_run(db, updated_run)
+
+                    # 2. 记录 RunStep / ToolCallRecord
+                    step = await run_trace_store.record_event(
+                        run_id=run.id,
+                        session_id=session_id,
+                        user_id=current_user.user_id,
+                        event_type=event.type,
+                        step_index=event.step,
+                        data=event.data,
+                    )
+                    if step is not None:
+                        await trace_repo.add_step(db, step)
 
                     # Day12: 分别维护"过程内容"和"最终回答"
                     # thought 是推理过程，不应直接当作最终回答持久化
@@ -222,12 +250,13 @@ async def chat_in_session_stream(
             except Exception as e:
                 # event_generator 自己挂了 （极少见）
 
-                await run_store.mark_failed(
+                failed_run = await run_store.mark_failed(
                     run_id=run.id,
                     error_type="internal_error",
                     error_detail=str(e),
                     error_user_message="服务内部错误，请稍后重试",
                 )
+                await run_repo.upsert_run(db, failed_run)
 
                 accumulated_content = "\n\n".join(process_fragments)
                 err_event = make_error_event(
@@ -250,9 +279,9 @@ async def chat_in_session_stream(
                     not in {"completed", "failed", "interrupted", "cancelled"}
                 ):
                     if completed_normally:
-                        await run_store.mark_completed(run.id)
+                        latest_run = await run_store.mark_completed(run.id)
                     elif last_error_data:
-                        await run_store.mark_failed(
+                        latest_run = await run_store.mark_failed(
                             run_id=run.id,
                             error_type=last_error_data.get("type", "stream_error"),
                             error_detail=json.dumps(
@@ -262,10 +291,11 @@ async def chat_in_session_stream(
                             error_user_message=last_error_data.get("user_message"),
                         )
                     else:
-                        await run_store.mark_interrupted(
+                        latest_run = await run_store.mark_interrupted(
                             run_id=run.id,
                             reason="stream_finished_without_completion",
                         )
+                    await run_repo.upsert_run(db, latest_run)
 
                 accumulated_content = (
                     collected_assistant_msg or "\n\n".join(process_fragments)
@@ -277,6 +307,7 @@ async def chat_in_session_stream(
                     accumulated_content=accumulated_content,
                     completed_normally=completed_normally,
                     last_error_data=last_error_data,
+                    db=db,
                 )
                 session.is_processing = False
     
@@ -296,6 +327,7 @@ async def _persist_session_messages(
     accumulated_content: str,
     completed_normally: bool,
     last_error_data: Optional[dict],
+    db: AsyncSession,
 ):
     """智能持久化：根据流式结果决定怎么存"""
     user_msg = Message(
@@ -330,4 +362,18 @@ async def _persist_session_messages(
         session_id=session_id,
         user_id=user_id,
         messages=[user_msg, assistant_msg],
+    )
+
+    await session_repo.add_message(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+        message=user_msg,
+    )
+
+    await session_repo.add_message(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+        message=assistant_msg,
     )
