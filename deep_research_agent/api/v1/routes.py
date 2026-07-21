@@ -181,14 +181,36 @@ async def chat_in_session_stream(
     if lock.locked():
         raise HTTPException(409, "Session is currently processing another request")
     
-    # 3. 拼装历史 + 新问题
-    history = session.to_llm_messages()
-    history.append({"role": "user", "content": request.question})
+    # 3. 创建用户消息
+    user_msg = Message(
+        role="user",
+        content=request.question,
+        status="complete",
+    )
 
-    # 4. 创建 AgentRun
+    # 4. 先写内存
+    await session_store.append_messages(
+        session_id=session_id,
+        user_id=current_user.user_id,
+        messages=[user_msg],
+    )
+
+    # 5. 再写数据库
+    await session_repo.add_message(
+        db=db,
+        session_id=session_id,
+        user_id=current_user.user_id,
+        message=user_msg,
+    )
+
+    # 6. 现在从 Session 重新构造 history
+    history = session.to_llm_messages()
+
+    # 7. 创建 run, 并关联 user_message_id
     run = await run_store.create(
         session_id=session_id,
         user_id=current_user.user_id,
+        user_message_id=user_msg.id,
         metadata={
             "question": request.question,
             "entrypoint": "chat_stream",
@@ -196,7 +218,7 @@ async def chat_in_session_stream(
     )
     await run_repo.upsert_run(db, run)
 
-    # 5. 创建 Agent
+    # 8. 创建 Agent
     agent = ResearchAgent(
         max_steps=request.max_steps,
         verbose=False,
@@ -356,15 +378,18 @@ async def chat_in_session_stream(
                 accumulated_content = (
                     collected_assistant_msg or "\n\n".join(process_fragments)
                 )
-                await _persist_session_messages(
+                assistant_msg = await _persist_assistant_message(
                     session_id=session_id,
                     user_id=current_user.user_id,
-                    user_question=request.question,
                     accumulated_content=accumulated_content,
                     completed_normally=completed_normally,
                     last_error_data=last_error_data,
                     db=db,
                 )
+                latest_run.assistant_message_id = assistant_msg.id
+                await run_store.update(latest_run)
+                await run_repo.upsert_run(db, latest_run)
+                
                 session.is_processing = False
     
     return StreamingResponse(
@@ -376,55 +401,47 @@ async def chat_in_session_stream(
         },
     )
 
-async def _persist_session_messages(
+async def _persist_assistant_message(
+    *,
     session_id: str,
     user_id: str,
-    user_question: str,
     accumulated_content: str,
     completed_normally: bool,
     last_error_data: Optional[dict],
     db: AsyncSession,
-):
-    """智能持久化：根据流式结果决定怎么存"""
-    user_msg = Message(
-        role="user",
-        content=user_question,
-        status="complete",
-    )
+    ) -> Message:
     if completed_normally and accumulated_content:
-        # 完整成功
         assistant_msg = Message(
             role="assistant",
-            content=accumulated_content,
+            content="accumulated_content",
             status="complete",
         )
     elif accumulated_content:
-        # 部分成功（流中断或错误，但有内容）
         assistant_msg = Message(
             role="assistant",
             content=accumulated_content,
             status="interrupted",
-            error_detail=json.dumps(last_error_data) if last_error_data else "流中断",
+            error_detail=(
+                json.dumps(last_error_data, ensure_ascii=False)
+                if last_error_data
+                else "流中断"
+            )
         )
     else:
-        # 完全失败，没有任何 assistant 内容
         assistant_msg = Message(
             role="assistant",
             content="[请求失败，未能生成回答]",
             status="failed",
-            error_detail=json.dumps(last_error_data) if last_error_data else "未知错误",
+            error_detail=(
+                json.dumps(last_error_data, ensure_ascii=False)
+                if last_error_data
+                else "未知错误"
+            )
         )
     await session_store.append_messages(
         session_id=session_id,
         user_id=user_id,
-        messages=[user_msg, assistant_msg],
-    )
-
-    await session_repo.add_message(
-        db=db,
-        session_id=session_id,
-        user_id=user_id,
-        message=user_msg,
+        messages=[assistant_msg],
     )
 
     await session_repo.add_message(
@@ -433,3 +450,5 @@ async def _persist_session_messages(
         user_id=user_id,
         message=assistant_msg,
     )
+
+    return assistant_msg

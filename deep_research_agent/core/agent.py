@@ -6,35 +6,29 @@ ResearchAgent：深度研究 Agent 主类
 - 真实工具（Day 5）
 - 错误处理 + HITL + 审计（Day 6）
 """
-
-
-from itertools import accumulate
-from nt import error
 import os, sys
-
 from openai import max_retries
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import json
 import time
-
 import asyncio
 import json
 from typing import AsyncIterator, Optional
 from deep_research_agent.core.events import AgentEvent, agent_error_to_event, make_error_event
-
 from shared.llm_client import client, DEFAULT_MODEL
 from shared.context_manager import ContextManager
 from shared.token_counter import count_messages_tokens
 from shared.safety import safe_execute, CLIApprover
 from shared.agent_errors import AgentError, classify_exception, ToolTimeout, ToolUnavailable
 from shared.audit_log import audit
-
 from deep_research_agent.core.prompts import RESEARCH_SYSTEM_PROMPT
 from deep_research_agent.core.tools import (
     RESEARCH_TOOLS, RESEARCH_TOOLS_SCHEMA, get_tool_by_name,
 )
 from deep_research_agent.core.report import RunReport
-
+from deep_research_agent.core.checkpoint_manager import (
+    checkpoint_manager
+)
 class ResearchAgent:
     """
     深度研究 Agent

@@ -193,3 +193,65 @@ class ToolCallRecordORM(Base):
     run: Mapped["AgentRunORM"] = relationship(
         back_populates="tool_calls"
     )
+
+class RunCheckpointORM(Base):
+    __tablename__ = "run_checkpoints"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+    run_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agent_runs.id"),
+        index=True,
+        nullable=False
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        index=True,
+        nullable=False,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        index=True,
+        nullable=False,
+    )
+
+    step_index: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+
+    checkpoint_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    messages_snapshot: Mapped[list] = mapped_column(
+        JSON,
+        default=list,
+    )
+
+    accumulated_content: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    last_event_type: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    metadata_json: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.now,
+        nullable=False,
+    )

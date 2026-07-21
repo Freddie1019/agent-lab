@@ -7,7 +7,14 @@ from deep_research_agent.core.db.models import (
     RunStepORM,
     SessionORM,
     ToolCallRecordORM,
+    RunCheckpointORM,
 )
+
+from deep_research_agent.core.checkpoint import (
+    CheckpointType,
+    RunCheckpoint,
+)
+
 from deep_research_agent.core.run import AgentRun
 from deep_research_agent.core.run_trace import RunStep, ToolCallRecord
 from deep_research_agent.core.session import Message, Session
@@ -375,8 +382,67 @@ class TraceRepository:
 
         await db.commit()
 
+class CheckpointRepository:
 
+    async def add(
+        self,
+        db: AsyncSession,
+        checkpoint: RunCheckpoint,
+    ) -> None:
+        db.add(
+            RunCheckpoint(
+                id=checkpoint.id,
+                run_id=checkpoint.run_id,
+                session_id=checkpoint.session_id,
+                user_id=checkpoint.user_id,
+                step_index=checkpoint.step_index,
+                checkpoint_type=checkpoint.checkpoint_type.value,
+                messages_snapshot=checkpoint.messages_snapshot,
+                accumulated_content=checkpoint.accumulated_content,
+                last_event_type=checkpoint.last_event_type,
+                metadata_json=checkpoint.metadata,
+                created_at=checkpoint.created_at,
+            )
+        )
+        await db.commit()
+
+    async def get_latest(
+        self,
+        db: AsyncSession,
+        run_id: str,
+        user_id: str,
+    ) -> RunCheckpoint | None:
+        result = await db.execute(
+            select(RunCheckpointORM)
+            .where(RunCheckpointORM.run_id == run_id)
+            .where(RunCheckpointORM.user_id == user_id)
+            .order_by(
+                RunCheckpointORM.step_index.desc(),
+                RunCheckpointORM.created_at.desc(),
+            )
+            .limit(1)
+        )
+
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+        
+        return RunCheckpoint(
+            id=orm.id,
+            run_id=orm.run_id,
+            session_id=orm.session_id,
+            user_id=orm.user_id,
+            step_index=orm.step_index,
+            checkpoint_type=CheckpointType(orm.checkpoint_type),
+            messages_snapshot=orm.messages_snapshot or [],
+            accumulated_content=orm.accumulated_content,
+            last_event_type=orm.last_event_type,
+            metadata=orm.metadata_json or {},
+            created_at=orm.created_at,
+        )
 
 session_repo = SessionRepository()
 run_repo = RunRepository()
 trace_repo = TraceRepository()
+checkpoint_repo = CheckpointRepository()
