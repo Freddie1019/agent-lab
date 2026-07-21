@@ -220,6 +220,10 @@ async def chat_in_session_stream(
 
     # 8. 创建 Agent
     agent = ResearchAgent(
+        run_id=run.id,
+        session_id=session_id,
+        user_id=current_user.user_id,
+        db=db,
         max_steps=request.max_steps,
         verbose=False,
     )

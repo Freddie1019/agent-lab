@@ -29,6 +29,9 @@ from deep_research_agent.core.report import RunReport
 from deep_research_agent.core.checkpoint_manager import (
     checkpoint_manager
 )
+from deep_research_agent.core.checkpoint import (
+    CheckpointType,
+)
 class ResearchAgent:
     """
     深度研究 Agent
@@ -47,7 +50,11 @@ class ResearchAgent:
         max_context_tokens: int = 8000,
         context_strategy: str = "sliding_window",
         verbose: bool = True,
-        auto_retry_recoverable: bool = True
+        auto_retry_recoverable: bool = True,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        db=None
     ):
         self.model = model
         self.max_steps = max_steps
@@ -62,6 +69,11 @@ class ResearchAgent:
 
         self.approver= CLIApprover()
         self.auto_retry_recoverable = auto_retry_recoverable
+
+        self.run_id = run_id
+        self.session_id = session_id
+        self.user_id = user_id
+        self.db = db
     
     def _log(self, msg: str):
         if self.verbose:
@@ -248,8 +260,19 @@ class ResearchAgent:
         # ===== 开始事件 =====
         yield AgentEvent(
             type="agent_start",
-            data={"messages_count": len(messages)},
+            data={
+                "messages_count": len(messages)
+            },
         )
+
+        # 创建初始 checkpoint 
+        await checkpoint_manager.save_checkpoint(
+            checkpoint_type=CheckpointType.INITIAL,
+            messages=messages,
+            step=0,
+            event_type="agent_start",
+        )
+    
         
         accumulated_answer= "" # 累计已生成的内容，错误时返回给客户端
 
@@ -352,6 +375,24 @@ class ResearchAgent:
                             result = err.to_llm_message()
                             success = False
                     
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": str(result),
+                    })
+                    
+                    await checkpoint_manager.save_checkpoint(
+                        run_id=self.run_id,
+                        session_id=self.session_id,
+                        user_id=self.user_id,
+                        step_index=step,
+                        event_type="tool_result",
+                        checkpoint_type=CheckpointType.AFTER_TOOL_RESULT,
+                        messages=messages,
+                        accumulated_content=accumulated_answer or None,
+                        db=self.db,
+                    )
+                    
                     # 事件 2：返回工具结果
                     yield AgentEvent(
                         type="tool_result",
@@ -361,13 +402,7 @@ class ResearchAgent:
                             "success": success,
                             "result_preview": str(result)[:300],
                         },
-                    )
-                    
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": str(result),
-                    })
+                    ) 
                 continue
 
             # ===== 异常 finish_reason =====
