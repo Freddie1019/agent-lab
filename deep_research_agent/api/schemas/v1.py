@@ -3,6 +3,7 @@ V1 API 的请求/响应模型
 """
 from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
+from deep_research_agent.core.recovery import RecoveryMode 
 
 AllowedModel = Literal["gpt-4o-mini", "gpt-4o", "claude-3-5-sonnet"]
 
@@ -89,3 +90,15 @@ class ResearchResponse(BaseModel):
     total_tokens: int
     estimated_cost_usd: float
     errors: list
+
+class RecoverRunRequest(BaseModel):
+    """
+    
+    恢复 AgentRun 的请求参数
+    """
+    max_steps: int = Field(
+        default=10,
+        ge=1,
+        le=30,
+        description="恢复执行时允许的最大 Agent 步数",
+    )

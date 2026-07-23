@@ -31,6 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deep_research_agent.core.db.session import get_db_session
 from deep_research_agent.core.db.repositories import run_repo, trace_repo, session_repo
 
+# checkpoint检查点恢复
+from deep_research_agent.core.recovery import RunRecoveryPlan
+from deep_research_agent.services.recovery_service import recovery_service
+from deep_research_agent.core.db.repositories import checkpoint_repo
+
 async def _get_session_for_runtime(
     session_id: str,
     user_id: str,
@@ -456,3 +461,31 @@ async def _persist_assistant_message(
     )
 
     return assistant_msg
+
+@router.get("/runs/{run_id}/recovery-plan", response_model=RunRecoveryPlan)
+async def get_recovery_plan(
+    run_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> RunRecoveryPlan:
+    run = await run_repo.get_run_model(
+        db=db,
+        run_id=run_id,
+        user_id=current_user.user_id,
+    )
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Run not found",
+        )
+
+    checkpoint = await checkpoint_repo.get_latest(
+        db=db,
+        run_id=run_id,
+        user_id=current_user.user_id,
+    )
+
+    return recovery_service.build_plan(
+        run=run,
+        checkpoint=checkpoint,
+    )
