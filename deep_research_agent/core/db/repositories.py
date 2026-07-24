@@ -129,6 +129,71 @@ class SessionRepository:
 
         return sessions
 
+    async def get_message(
+        self,
+        db: AsyncSession,
+        message_id: str,
+        user_id: str,
+    ) -> Message | None:
+        """
+        按 message_id 和 user_id 查询一条消息
+        
+        同时使用 user_id, 防止 用户读取其他人的消息
+        """
+        result = await db.execute(
+            select(MessageORM)
+            .where(MessageORM.id == message_id)
+            .where(MessageORM.user_id == user_id)
+        )
+
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+
+        return orm_to_message(orm)
+
+    async def list_messages_until(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        user_id: str,
+        target_message_id: str,
+    ) -> list[Message]:
+        """
+        查询某个 Session 中， 从第一条消息到指定消息为止的历史
+
+        用于 regenerate：
+        保留原用户消息，但排除消息之后失败或中断的 assistant 消息。
+        """
+        target_result = await db.execute(
+            select(MessageORM)
+            .where(MessageORM.id == target_message_id)
+            .where(MessageORM.session_id == session_id)
+            .where(MessageORM.user_id == user_id)
+        )
+
+        target =target_result.scalar_one_or_none()
+
+        if target is None:
+            return []
+
+        result = await db.execute(
+            select(MessageORM)
+            .where(MessageORM.session_id == session_id)
+            .where(MessageORM.user_id == user_id)
+            .where(MessageORM.created_at <= target.created_at)
+            .order_by(
+                MessageORM.created_at.asc(),
+                MessageORM.id.asc(),
+            )
+        )
+
+        return [
+            orm_to_message(orm)
+            for orm in result.scalar().all()
+        ]
+
 class RunRepository:
     async def upsert_run(
         self,
@@ -199,6 +264,8 @@ class RunRepository:
         orm: AgentRunORM,
         run: AgentRun,
     ) -> None:
+        orm.user_message_id = run.user_message_id
+        orm.assistant_message_id = run.assistant_message_id
         orm.status = run.status.value if hasattr(run.status, "value") else str(run.status)
         orm.current_step = run.current_step
         orm.current_event = run.current_event
@@ -390,7 +457,7 @@ class CheckpointRepository:
         checkpoint: RunCheckpoint,
     ) -> None:
         db.add(
-            RunCheckpoint(
+            RunCheckpointORM(
                 id=checkpoint.id,
                 run_id=checkpoint.run_id,
                 session_id=checkpoint.session_id,

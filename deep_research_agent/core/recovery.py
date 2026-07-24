@@ -35,7 +35,7 @@ class RunRecoveryPlan(BaseModel):
     )
         
 
-    reson: str
+    reason: str
     warning: list[str] = (
         Field(default_factory=list)
     )

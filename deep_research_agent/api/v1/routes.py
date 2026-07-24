@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from deep_research_agent.core.events import AgentEvent
 from deep_research_agent.core.agent import ResearchAgent
 from deep_research_agent.core.domain import ResearchTask
-from deep_research_agent.api.schemas.v1 import ResearchRequest, ResearchResponse
+from deep_research_agent.api.schemas.v1 import ResearchRequest, ResearchResponse, RecoverRunRequest
 
 from deep_research_agent.core.session_store import session_store
 from deep_research_agent.core.session import Message
@@ -29,10 +29,10 @@ from deep_research_agent.core.run_trace_store import run_trace_store
 # 落库
 from sqlalchemy.ext.asyncio import AsyncSession
 from deep_research_agent.core.db.session import get_db_session
-from deep_research_agent.core.db.repositories import run_repo, trace_repo, session_repo
+from deep_research_agent.core.db.repositories import run_repo, trace_repo, session_repo, checkpoint_repo
 
 # checkpoint检查点恢复
-from deep_research_agent.core.recovery import RunRecoveryPlan
+from deep_research_agent.core.recovery import RunRecoveryPlan, RecoveryMode
 from deep_research_agent.services.recovery_service import recovery_service
 from deep_research_agent.core.db.repositories import checkpoint_repo
 
@@ -74,7 +74,6 @@ async def _get_session_for_runtime(
 
         return db_session_model
 
-
 # tracker.set_limit("web_search", 0)
 class ChatInSessionRequest(BaseModel):
     """ 在某个会话中追加一条消息 """
@@ -82,6 +81,34 @@ class ChatInSessionRequest(BaseModel):
     max_steps: int = Field(default=10, ge=1, le=30)
 
 router = APIRouter(prefix="/v1", tags=["v1"])
+
+def _messages_to_llm_history(
+    messages: list[Message],
+) -> list[dict]:
+    """
+    把数据库领域 Message 转成 OpenAI messages 格式。
+    """
+
+    history: list[dict] = []
+
+    for message in messages:
+        if message.role not in {
+            "system",
+            "user",
+            "assistant",
+            "tool",
+        }:
+            continue
+
+        item = {
+            "role": message.role,
+            "content": message.content,
+        }
+
+        history.append(item)
+
+    return history
+        
 
 @router.post("/research", response_model=ResearchResponse)
 def create_research(request: ResearchRequest):
@@ -136,7 +163,8 @@ async def stream_research(
     )
     async def event_generator():
         try:
-            async for event in agent.stream(request.question):
+            messages = [{"role": "user", "content": request.question}]
+            async for event in agent.stream_with_history(messages=messages):
                 # ★ 关键：每个事件前检查客户端是否断连
                 if await raw_request.is_disconnected():
                     print(f"⚠️ 客户端已断开，提前终止 Agent")
@@ -410,6 +438,411 @@ async def chat_in_session_stream(
         },
     )
 
+@router.post("/runs/{run_id}/recover/stream")
+async def recover_run_stream(
+    run_id: str,
+    request: RecoverRunRequest,
+    raw_request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    恢复失败或中断的 AgentRun
+
+    恢复不会修改旧 Run， 而是创建一个新的子 Run
+    """
+
+    # =====================================
+    # 1. 查询原 Run
+    # =====================================
+
+    original_run = await run_repo.get_run_model(
+        db=db,
+        run_id=run_id,
+        user_id=current_user.user_id,
+    )
+    if original_run is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Run not found",
+        )
+
+    # =====================================
+    # 2. 查询最近 Checkpoint
+    # =====================================
+
+    checkpoint = await checkpoint_repo.get_latest(
+        db=db,
+        run_id=run_id,
+        user_id=current_user.user_id,
+    )
+
+    # =====================================
+    # 3. 生辰并校验恢复计划
+    # =====================================
+
+    recovery_plan = recovery_service.build_plan(
+        run=original_run,
+        checkpoint=checkpoint,
+    )
+
+    if not recovery_plan.recoverable:
+        raise HTTPException(
+            status_code=409,
+            detail=recovery_plan.reason
+        )
+
+    if request.mode not in recovery_plan.allowed_modes:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "recovery_mode_not_allowed",
+                "message": (
+                    f"当前 Run 不允许使用"
+                    f"{request.mode.value} 恢复"
+                ),
+                "allowed_modes": [
+                    mode.value
+                    for mode in recovery_plan.allowed_modes
+                ],
+            },
+        )
+    # Day19 暂不实现通用工具重试
+    if request.mode == RecoveryMode.RETRY_TOOL:
+        raise HTTPException(
+            status_code=501,
+            detail="retry_tool 尚未实现"
+        )
+    
+    # =====================================
+    # 4. 恢复 Session
+    # =====================================
+
+    session = await session_repo.get_session(
+        db=db,
+        session_id=original_run.session_id,
+        user_id=current_user.user_id,
+    )
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found",
+        )
+
+    # 目前沿用单进程内存锁
+    lock = session_store.get_lock(original_run.session_id)
+
+    if lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="Session is currently processing another request",
+        )
+
+    # ===================================
+    # 5. 根据恢复模式构造 history
+    # ===================================
+
+    if request.mode == RecoveryMode.REGENERATE:
+        if not original_run.user_message_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "原 Run 没有关联 user_message_id,"
+                    "无法 regenerate"
+                ),
+            )
+
+        messages = await session_repo.list_messages_until(
+            db=db,
+            session_id=original_run.session_id,
+            user_id=current_user.user_id,
+            target_message_id=original_run.user_message_id,
+        )
+
+        if not messages:
+            raise HTTPException(
+                status_code=409,
+                detail="无法读取原始对话历史",
+            )
+
+        history = _messages_to_llm_history(messages)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported recovery mode",
+        )
+
+    # ===================================
+    # 6. 创建新的子 Run
+    # ===================================
+    new_run = await run_store.create(
+        session_id=original_run.session_id,
+        user_id=current_user.user_id,
+        user_message_id=original_run.user_message_id,
+        metadata={
+            "entrypoint": "run_recovery",
+            "recovery": {
+                "parent_run_id": original_run.id,
+                "mode": request.mode.value,
+                "checkpoint_id": (
+                    checkpoint.id
+                    if checkpoint is not None
+                    else None
+                ),
+            },
+        },
+    )
+    await run_repo.upsert_run(db, new_run)
+
+    # ===================================
+    # 7. 创建新的 Agent
+    # ===================================
+    agent = ResearchAgent(
+        max_steps=request.max_steps,
+        verbose=False,
+        run_id=new_run.id,
+        session_id=original_run.session_id,
+        user_id=current_user.user_id,
+        db=db,
+    )
+
+    # ===================================
+    # 8. 构建 SSE 事件生成器
+    # ===================================
+    async def event_generator():
+        process_fragments: list[str] = []
+
+        # resume 时保留此前已经积累的内容，作为再次中断时的兜底
+        collected_assistant_msg = (
+            checkpoint.accumulated_content
+            if (
+                request.mode
+                == RecoveryMode.RESUME_FROM_CHECKPOINT
+                and checkpoint is not None
+            )
+            else ""
+        ) or ""
+
+        last_error_data: Optional[dict] = None
+        completed_normally = False
+
+        async with lock:
+            session.is_processing = True
+
+            try:
+                # 第一件事告诉客户端新旧 Run 的关联
+                run_created = AgentEvent(
+                    type="agent_start",
+                    data={
+                        "run_id": new_run.id,
+                        "session_id": original_run.session_id,
+                        "parent_run_id": original_run.id,
+                        "recovery_mode": request.mode.value,
+                        "message": "Recovery run created",
+                    },
+                )
+
+                updated_run = await run_store.update_from_event(
+                    run_id=new_run.id,
+                    event_type=run_created.type,
+                    step=run_created.step,
+                    data=run_created.data,
+                )
+
+                await run_repo.upsert_run(
+                    db,
+                    updated_run,
+                )
+
+                yield run_created.to_sse()
+
+                # Agent 自身会在稳定位置写 Checkpoint
+                async for event in agent.stream_with_history(
+                    messages=history,
+                ):
+                    if await raw_request.is_disconnected():
+                        interrupted_run = (
+                            await run_store.mark_interrupted(
+                                run_id=new_run.id,
+                                reason="client_disconnected",
+                            )
+                        )
+
+                        await run_repo.upsert_run(
+                            db,
+                            interrupted_run,
+                        )
+
+                    # 更新新 Run 的整体状态
+                    updated_run = await run_store.update_from_event(
+                        run_id=new_run.id,
+                        event_type=event.type,
+                        step=event.step,
+                        data=event.data,
+                    )
+
+                    await run_repo.upsert_run(
+                        db,
+                        updated_run,
+                    )
+
+                    # 记录恢复 Run 的执行轨迹
+                    trace_result = await run_trace_store.record_event(
+                        run_id=new_run.id,
+                        session_id=original_run.session_id,
+                        user_id=current_user.user_id,
+                        event_type=event.type,
+                        step_index=event.step,
+                        data=event.data,
+                    )
+
+                    if trace_result.step is not None:
+                        await trace_repo.add_step(
+                            db,
+                            trace_result.step,
+                        )
+
+                    if trace_result.tool_call_created is not None:
+                        await trace_repo.add_tool_call(
+                            db,
+                            trace_result.tool_call_created,
+                        )
+                    if trace_result.tool_call_updated is not None:
+                        await trace_repo.upsert_tool_call(
+                            db,
+                            trace_result.tool_call_updated,
+                        )
+                    if event.type == "thought":
+                        content = event.data.get(
+                            "content",
+                            "",
+                        )
+                        if content:
+                            process_fragments.append(content)
+                    elif event.type == "answer_complete":
+                        collected_assistant_msg = event.data.get(
+                            "answer",
+                            "",
+                        )
+                    elif event.type == "error":
+                        last_error_data = event.data
+
+                    elif event.type == "agent_complete":
+                        completed_normally = (
+                            event.data.get("status")
+                            == "success"
+                        )
+                    yield event.to_sse()
+                yield "event: done\ndata: [DONE]\n\n"
+            except Exception as exc:
+                failed_run = await run_store.mark_failed(
+                    run_id=new_run.id,
+                    error_type="recovery_internal_error",
+                    error_detail=str(exc),
+                    error_user_message="恢复执行失败，请稍后重试",
+                )
+
+                await run_repo.upsert_run(
+                    db,
+                    failed_run,
+                )
+
+                last_error_data = {
+                    "type": "recovery_internal_error",
+                    "detail": str(exc),
+                    "user_message": "恢复执行失败，请稍后重试",
+                }
+
+                error_event = make_error_event(
+                    type="recovery_internal_error",
+                    title="Recovery Failed",
+                    detail=str(exc),
+                    user_message="恢复执行失败，请稍后重试",
+                    accumulated_content=(
+                        collected_assistant_msg
+                        or "\n\n".join(process_fragments)
+                        or None
+                    ),
+                )
+
+                yield error_event.to_sse()
+                yield "event: done\ndata: [DONE]\n\n"
+            finally:
+                latest_run = await run_store.get(
+                    new_run.id,
+                    user_id=current_user.user_id,
+                )
+
+                if latest_run.status.value not in (
+                    "completed",
+                    "failed",
+                    "interrupted",
+                    "concelled",
+                ):
+                    if completed_normally:
+                        latest_run = await run_store.mark_completed(
+                            new_run.id,
+                        )
+                    elif last_error_data:
+                        latest_run = await run_store.mark_failed(
+                            run_id=new_run.id,
+                            error_type=last_error_data.get(
+                                "type",
+                                "recovery_stream_error",
+                            ),
+                            error_detail=json.dumps(
+                                last_error_data,
+                                ensure_ascii=False,
+                            ),
+                            error_user_message=last_error_data.get(
+                                "user_message",
+                            ),
+                        )
+                    else:
+                        latest_run = (
+                            await run_store.mark_interrupted(
+                                run_id=new_run.id,
+                                reason=(
+                                    "recovery_stream_finished_"
+                                    "without_completion"
+                                ),
+                            )
+                        )
+                await run_repo.upsert_run(
+                    db,
+                    latest_run,
+                )
+
+                accumulated_content = (
+                    collected_assistant_msg
+                    or "\n\n.join(process_fragments)"
+                )
+
+                assistant_msg = await _persist_assistant_message(
+                    session_id=original_run.session_id,
+                    user_id=current_user.user_id,
+                    accumulated_content=accumulated_content,
+                    completed_normally=completed_normally,
+                    last_error_data=last_error_data,
+                    db=db,
+                )
+                latest_run.assistant_message_id = assistant_msg.id
+
+                await run_store.update(latest_run)
+                await run_repo.upsert_run(
+                    db,
+                    latest_run,
+                )
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
 async def _persist_assistant_message(
     *,
     session_id: str,
@@ -422,7 +855,7 @@ async def _persist_assistant_message(
     if completed_normally and accumulated_content:
         assistant_msg = Message(
             role="assistant",
-            content="accumulated_content",
+            content=accumulated_content,
             status="complete",
         )
     elif accumulated_content:

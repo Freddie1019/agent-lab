@@ -61,7 +61,7 @@ class AgentRunStore:
     
     async def update(self, run: AgentRun) -> AgentRun:
         async with self._lock:
-            self._run[run.id] = run
+            self._runs[run.id] = run
             return run
     
     async def mark_started(self, run_id: str) -> AgentRun:

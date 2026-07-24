@@ -267,10 +267,15 @@ class ResearchAgent:
 
         # 创建初始 checkpoint 
         await checkpoint_manager.save_checkpoint(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            user_id=self.user_id,
+            step_index=0,
+            event_type="agent_start",
             checkpoint_type=CheckpointType.INITIAL,
             messages=messages,
-            step=0,
-            event_type="agent_start",
+            accumulated_content=None,
+            db=self.db,
         )
     
         

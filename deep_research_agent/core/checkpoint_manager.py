@@ -28,6 +28,7 @@ class CheckpointManager:
             user_id=user_id,
             step_index=step_index,
             checkpoint_type=checkpoint_type,
+            messages_snapshot=messages,
             accumulated_content=accumulated_content,
             last_event_type=event_type,
         )

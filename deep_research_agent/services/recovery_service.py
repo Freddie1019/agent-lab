@@ -16,7 +16,7 @@ class RecoveryService:
                 run_id=run.id,
                 recoverable=False,
                 recommended_mode=RecoveryMode.NONE,
-                resaon="Run已经完成，不需要恢复"
+                reason="Run已经完成，不需要恢复"
             )
 
         # 2. 没有checkpoint
@@ -28,7 +28,7 @@ class RecoveryService:
                 allowed_modes=[
                     RecoveryMode.REGENERATE
                 ],
-                reson="没有checkpoint，只能重新生成"
+                reason="没有checkpoint，只能重新生成"
             )
 
         # 3. 有checkpoint
@@ -47,7 +47,7 @@ class RecoveryService:
                 RecoveryMode.RESUME_FROM_CHECKPOINT,
                 RecoveryMode.REGENERATE
             ],
-            reson="存在稳定checkpoint，可以继续恢复",
+            reason="存在稳定checkpoint，可以继续恢复",
             warning=warnings,
             checkpoint_id=checkpoint.id,
             checkpoint_step=checkpoint.step_index
