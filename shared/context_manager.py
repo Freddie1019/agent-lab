@@ -43,7 +43,7 @@ class ContextManager:
         elif self.strategy == "summarization":
             return self._summarize(messages)
         else:
-            raise ValueError(f"Unknow strategy: {self.strategy}")
+            raise ValueError(f"Unknown strategy: {self.strategy}")
     
     # ===== 策略 1：滑窗 =====
     def _sliding_window(self, messages: list) -> list:

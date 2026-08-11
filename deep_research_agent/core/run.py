@@ -1,8 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 from pydantic import BaseModel, Field
+
+
+def utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp for persisted Run state."""
+    return datetime.now(timezone.utc)
+
 
 class AgentRunStatus(str, Enum):
     """
@@ -66,6 +72,11 @@ class AgentRun(BaseModel):
     current_event: Optional[str] = None
     current_tool: Optional[str] = None
 
+    # 添加运行实例和健康状态
+    runtime_id: Optional[str] = None
+    last_heartbeat_at: Optional[datetime] = None
+    stale_detected_at: Optional[datetime] = None
+
      # 错误信息
     error_type: Optional[str] = None
     error_detail: Optional[str] = None
@@ -76,22 +87,22 @@ class AgentRun(BaseModel):
     total_tool_calls: int = 0
 
     # 时间
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utc_now)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-    updated_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
     # 扩展字段
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def mark_started(self) -> None:
-        now = datetime.now()
+        now = utc_now()
         self.status = AgentRunStatus.RUNNING
         self.started_at = now
         self.updated_at = now
     
     def mark_completed(self) -> None:
-        now = datetime.now()
+        now = utc_now()
         self.status = AgentRunStatus.COMPLETED
         self.completed_at = now
         self.updated_at = now
@@ -102,7 +113,7 @@ class AgentRun(BaseModel):
         error_detail: str,
         error_user_message: Optional[str] = None,
     ) -> None:
-        now = datetime.now()
+        now = utc_now()
         self.status = AgentRunStatus.FAILED
         self.error_type = error_type
         self.error_detail = error_detail
@@ -114,7 +125,7 @@ class AgentRun(BaseModel):
         self,
         reason: str = "client_disconnected",
     ) -> None:
-        now = datetime.now()
+        now = utc_now()
         self.status = AgentRunStatus.INTERRUPTED
         self.error_type = "interrupted"
         self.error_detail = reason
@@ -125,7 +136,7 @@ class AgentRun(BaseModel):
         self,
         reason: str = "user_cancelled",
     ) -> None:
-        now = datetime.now()
+        now = utc_now()
         self.status = AgentRunStatus.CANCELLED
         self.error_type = "cancelled"
         self.error_detail = reason
@@ -134,20 +145,20 @@ class AgentRun(BaseModel):
     
     def update_step(self, step: int) -> None:
         self.current_step = step
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()
 
     def update_event(self, event_type: str) -> None:
         self.current_event = event_type
         self.total_events += 1
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()
 
     def mark_waiting_tool(self, tool_name: Optional[str] = None) -> None:
         self.status = AgentRunStatus.WAITING_TOOL
         self.current_tool = tool_name
         self.total_tool_calls += 1
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()
 
     def mark_running(self) -> None:
         self.status = AgentRunStatus.RUNNING
         self.current_tool = None
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()

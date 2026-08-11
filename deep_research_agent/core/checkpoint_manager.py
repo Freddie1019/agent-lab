@@ -22,13 +22,20 @@ class CheckpointManager:
         accumulated_content,
         db,
     ):
+        normalized_messages = [
+            message.model_dump(mode="json", exclude_none=True)
+            if hasattr(message, "model_dump")
+            else message
+            for message in messages
+        ]
+
         checkpoint = RunCheckpoint(
             run_id=run_id,
             session_id=session_id,
             user_id=user_id,
             step_index=step_index,
             checkpoint_type=checkpoint_type,
-            messages_snapshot=messages,
+            messages_snapshot=normalized_messages,
             accumulated_content=accumulated_content,
             last_event_type=event_type,
         )

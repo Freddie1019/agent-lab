@@ -36,6 +36,9 @@ from deep_research_agent.core.recovery import RunRecoveryPlan, RecoveryMode
 from deep_research_agent.services.recovery_service import recovery_service
 from deep_research_agent.core.db.repositories import checkpoint_repo
 
+# 添加heartbeat
+from deep_research_agent.services.run_health_service import run_health_service
+
 async def _get_session_for_runtime(
     session_id: str,
     user_id: str,
@@ -271,7 +274,15 @@ async def chat_in_session_stream(
             last_error_data: Optional[dict] = None
             completed_normally = False
 
+            heartbeat_handle = None
+
             try:
+                heartbeat_handle = (
+                    await run_health_service.start_monitor(
+                        run_id=run.id,
+                        user_id=current_user.user_id,
+                    )
+                )
                 # 先告诉客户端 run_id
                 run_created = AgentEvent(
                     type="agent_start",
@@ -426,7 +437,9 @@ async def chat_in_session_stream(
                 latest_run.assistant_message_id = assistant_msg.id
                 await run_store.update(latest_run)
                 await run_repo.upsert_run(db, latest_run)
-                
+
+                if heartbeat_handle is not None:
+                    await heartbeat_handle.stop()
                 session.is_processing = False
     
     return StreamingResponse(
@@ -518,17 +531,11 @@ async def recover_run_stream(
     # 4. 恢复 Session
     # =====================================
 
-    session = await session_repo.get_session(
-        db=db,
+    session = await _get_session_for_runtime(
         session_id=original_run.session_id,
         user_id=current_user.user_id,
+        db=db,
     )
-
-    if session is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Session not found",
-        )
 
     # 目前沿用单进程内存锁
     lock = session_store.get_lock(original_run.session_id)
@@ -567,6 +574,17 @@ async def recover_run_stream(
             )
 
         history = _messages_to_llm_history(messages)
+    elif request.mode == RecoveryMode.RESUME_FROM_CHECKPOINT:
+        if checkpoint is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No checkpoint available for resume",
+            )
+
+        history = [
+            dict(message)
+            for message in checkpoint.messages_snapshot
+        ]
     else:
         raise HTTPException(
             status_code=400,
@@ -627,10 +645,18 @@ async def recover_run_stream(
         last_error_data: Optional[dict] = None
         completed_normally = False
 
+        heartbeat_handle = None
+
         async with lock:
             session.is_processing = True
 
             try:
+                heartbeat_handle = (
+                    await run_health_service.start_monitor(
+                        run_id=new_run.id,
+                        user_id=current_user.user_id,
+                    )
+                )
                 # 第一件事告诉客户端新旧 Run 的关联
                 run_created = AgentEvent(
                     type="agent_start",
@@ -673,6 +699,7 @@ async def recover_run_stream(
                             db,
                             interrupted_run,
                         )
+                        break
 
                     # 更新新 Run 的整体状态
                     updated_run = await run_store.update_from_event(
@@ -697,22 +724,23 @@ async def recover_run_stream(
                         data=event.data,
                     )
 
-                    if trace_result.step is not None:
-                        await trace_repo.add_step(
-                            db,
-                            trace_result.step,
-                        )
+                    if trace_result is not None:
+                        if trace_result.step is not None:
+                            await trace_repo.add_step(
+                                db,
+                                trace_result.step,
+                            )
 
-                    if trace_result.tool_call_created is not None:
-                        await trace_repo.add_tool_call(
-                            db,
-                            trace_result.tool_call_created,
-                        )
-                    if trace_result.tool_call_updated is not None:
-                        await trace_repo.upsert_tool_call(
-                            db,
-                            trace_result.tool_call_updated,
-                        )
+                        if trace_result.tool_call_created is not None:
+                            await trace_repo.add_tool_call(
+                                db,
+                                trace_result.tool_call_created,
+                            )
+                        if trace_result.tool_call_updated is not None:
+                            await trace_repo.upsert_tool_call(
+                                db,
+                                trace_result.tool_call_updated,
+                            )
                     if event.type == "thought":
                         content = event.data.get(
                             "content",
@@ -816,7 +844,7 @@ async def recover_run_stream(
 
                 accumulated_content = (
                     collected_assistant_msg
-                    or "\n\n.join(process_fragments)"
+                    or "\n\n".join(process_fragments)
                 )
 
                 assistant_msg = await _persist_assistant_message(
@@ -834,14 +862,20 @@ async def recover_run_stream(
                     db,
                     latest_run,
                 )
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
+
+                if heartbeat_handle is not None:
+                    await heartbeat_handle.stop()
+
+                session.is_processing = False
+                
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 async def _persist_assistant_message(
     *,

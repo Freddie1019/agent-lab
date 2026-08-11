@@ -165,7 +165,9 @@ class ResearchAgent:
 
             msg = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
-            messages.append(msg)
+            messages.append(
+                msg.model_dump(mode="json", exclude_none=True)
+            )
             
             # 5. 判断状态
             if finish_reason == "stop":
@@ -302,7 +304,9 @@ class ResearchAgent:
             
             msg = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
-            messages.append(msg)
+            messages.append(
+                msg.model_dump(mode="json", exclude_none=True)
+            )
 
             # 思考事件
             if msg.content:

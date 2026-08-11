@@ -96,6 +96,10 @@ class RecoverRunRequest(BaseModel):
     
     恢复 AgentRun 的请求参数
     """
+    mode: RecoveryMode = Field(
+        ...,
+        description="Recovery mode",
+    )
     max_steps: int = Field(
         default=10,
         ge=1,

@@ -16,6 +16,9 @@ from deep_research_agent.core.db.repositories import run_repo, trace_repo, check
 from deep_research_agent.core.recovery import RunRecoveryPlan
 from deep_research_agent.services.recovery_service import recovery_service
 
+# 添加 heartbeat 相关
+from deep_research_agent.core.run_health import RunHealthResponse
+from deep_research_agent.services.run_health_service import run_health_service
 
 router = APIRouter(prefix="/v1",tags=["runs"])
 
@@ -37,7 +40,28 @@ async def get_run(
         )
     
     return run
+
+@router.get("/runs/{run_id}/health", response_model=RunHealthResponse)
+async def get_run_health(
+    run_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> RunHealthResponse:
+    run = await run_repo.get_run_model(
+        db=db,
+        run_id=run_id,
+        user_id=current_user.user_id,
+    )
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Run not found",
+        )
     
+    return run_health_service.build_health_response(
+        run
+    )
+
 @router.get("/sessions/{session_id}/runs", response_model=list[AgentRun])
 async def list_session_runs(
     session_id: str,

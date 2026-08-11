@@ -2,7 +2,7 @@
 集中化配置管理
 所有环境变量、API Key、参数默认值都在这里
 """
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
 
@@ -42,6 +42,26 @@ class Settings(BaseSettings):
 
     # 添加 DB 
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/agent_lab.db"
+
+    # === Day20 Heartbeat ===
+    RUN_HEARTBEAT_INTERVAL_SECONDS: int = Field(default=5, ge=1)
+    RUN_STALE_AFTER_SECONDS: int = Field(default=20, ge=1)
+    RUN_RECONCILE_INTERVAL_SECONDS: int = Field(default=5, ge=1)
+    RUN_RECONCILE_ON_STARTUP: bool = True
+
+    @model_validator(mode="after")
+    def validate_run_health_setting(self):
+        minmum_stale_seconds = (
+            self.RUN_HEARTBEAT_INTERVAL_SECONDS * 3
+        )
+
+        if self.RUN_STALE_AFTER_SECONDS < minmum_stale_seconds:
+            raise ValueError(
+                "RUN_STALE_AFTER_SECONDS 至少应为 "
+                "RUN_HEARTBEAT_INTERVAL_SECONDS 的 3 倍"
+            )
+
+        return self
 
 # 全局单例
 _settings: Settings | None = None

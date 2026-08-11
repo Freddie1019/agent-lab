@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research_agent.core.db.models import (
@@ -15,7 +17,7 @@ from deep_research_agent.core.checkpoint import (
     RunCheckpoint,
 )
 
-from deep_research_agent.core.run import AgentRun
+from deep_research_agent.core.run import AgentRun, AgentRunStatus
 from deep_research_agent.core.run_trace import RunStep, ToolCallRecord
 from deep_research_agent.core.session import Message, Session
 
@@ -191,10 +193,14 @@ class SessionRepository:
 
         return [
             orm_to_message(orm)
-            for orm in result.scalar().all()
+            for orm in result.scalars().all()
         ]
 
 class RunRepository:
+    ACTIVE_HEARTBEAT_STATUSES = {
+        AgentRunStatus.RUNNING.value,
+        AgentRunStatus.WAITING_TOOL.value,
+    }
     async def upsert_run(
         self,
         db: AsyncSession,
@@ -208,6 +214,219 @@ class RunRepository:
             self._update_orm(existing, run)
         
         await db.commit()
+
+    async def claim_runtime(
+        self,
+        db: AsyncSession,
+        *,
+        run_id: str,
+        user_id: str,
+        runtime_id: str,
+    ) -> AgentRun:
+        """
+        声明当前 Run， 由指定服务实例负责执行。
+        """
+        now = datetime.now(timezone.utc)
+
+        result = await db.execute(
+            update(AgentRunORM)
+            .where(AgentRunORM.id == run_id)
+            .where(AgentRunORM.user_id == user_id)
+            .values(
+                runtime_id=runtime_id,
+                last_heartbeat_at=now,
+                stale_detected_at=None,
+                updated_at=now,
+            )
+        )
+        if result.rowcount != 1:
+            await db.rollback()
+            raise KeyError(f"Run not found: {run_id}")
+
+        await db.commit()
+
+        run = await self.get_run_model(
+            db=db,
+            run_id=run_id,
+            user_id=user_id,
+        )
+
+        if run is None:
+            raise KeyError(f"Run not found: {run_id}")
+
+        return run
+
+    async def touch_heartbeat(
+        self,
+        db: AsyncSession,
+        *,
+        run_id: str,
+        runtime_id: str,
+    ) -> bool:
+        """
+        更新运行中 Run 的 Heartbeat。
+
+        只允许当前 runtime 更新自己负责的 Run
+        """
+        now = datetime.now(timezone.utc)
+
+        result = await db.execute(
+            update(AgentRunORM)
+            .where(AgentRunORM.id == run_id)
+            .where(AgentRunORM.runtime_id == runtime_id)
+            .where(
+                AgentRunORM.status.in_(
+                    self.ACTIVE_HEARTBEAT_STATUSES
+                )
+            )
+            .values(
+                last_heartbeat_at=now,
+                updated_at=now
+            )
+        )
+        await db.commit()
+
+        return result.rowcount == 1
+
+    async def find_stale_runs(
+        self,
+        db: AsyncSession,
+        *,
+        stale_after_seconds: int,
+    ) -> list[AgentRun]:
+        """
+        查询 Heartbeat 已经过期的活动 Run。
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(
+            seconds=stale_after_seconds
+        )
+
+        stale_condition = or_(
+            AgentRunORM.last_heartbeat_at < cutoff,
+            # A correctly-started active Run is claimed before it becomes
+            # running. Missing both fields therefore identifies an orphaned
+            # or legacy Run affected by the old heartbeat overwrite bug.
+            and_(
+                AgentRunORM.runtime_id.is_(None),
+                AgentRunORM.last_heartbeat_at.is_(None),
+            ),
+            and_(
+                AgentRunORM.last_heartbeat_at.is_(None),
+                AgentRunORM.updated_at < cutoff,
+            ),
+        )
+
+        result = await db.execute(
+            select(AgentRunORM)
+            .where(
+                AgentRunORM.status.in_(
+                    self.ACTIVE_HEARTBEAT_STATUSES
+                )
+            )
+            .where(stale_condition)
+            .order_by(AgentRunORM.updated_at.asc())
+        )
+
+        return [
+            orm_to_agent_run(orm)
+            for orm in result.scalars().all()
+        ]
+
+    async def mark_stale_interrupted(
+        self,
+        db: AsyncSession,
+        *,
+        run: AgentRun,
+    ) -> AgentRun | None:
+        """
+        将 Stale Run 修复为 interrupted
+        """
+        now = datetime.now(timezone.utc)
+
+        waiting_tool = (
+            run.status == AgentRunStatus.WAITING_TOOL
+        )
+
+        error_type = (
+            "stale_waiting_tool"
+            if waiting_tool
+            else "stale_run_detected"
+        )
+
+        error_detail = (
+            "Run 在等待工具结果时停止 Heartbeat。"
+            "工具可能已产生副作用，恢复前需要检查。"
+            if waiting_tool
+            else
+            "Run 长时间未更新 Heartbeat，"
+            "推断原执行进程已经终止。"
+        )
+
+        statement = (
+            update(AgentRunORM)
+            .where(AgentRunORM.id == run.id)
+            .where(AgentRunORM.user_id == run.user_id)
+            .where(
+                AgentRunORM.status.in_(
+                    self.ACTIVE_HEARTBEAT_STATUSES
+                )
+            )
+        )
+
+        # Compare-and-set the lease snapshot. If a heartbeat renewed the Run
+        # after the stale scan, do not interrupt the live worker.
+        if run.runtime_id is None:
+            statement = statement.where(
+                AgentRunORM.runtime_id.is_(None)
+            )
+        else:
+            statement = statement.where(
+                AgentRunORM.runtime_id == run.runtime_id
+            )
+
+        if run.last_heartbeat_at is None:
+            statement = statement.where(
+                AgentRunORM.last_heartbeat_at.is_(None)
+            )
+        else:
+            statement = statement.where(
+                AgentRunORM.last_heartbeat_at
+                == run.last_heartbeat_at
+            )
+
+        result = await db.execute(
+            statement.values(
+                status=AgentRunStatus.INTERRUPTED.value,
+                error_type=error_type,
+                error_detail=error_detail,
+                error_user_message=(
+                    "任务执行已异常中断，可以尝试恢复。"
+                ),
+                stale_detected_at=now,
+                completed_at=now,
+                updated_at=now,
+            )
+        )
+
+        if result.rowcount != 1:
+            await db.rollback()
+            return None
+
+        await db.commit()
+
+        repaired_run = await self.get_run_model(
+            db=db,
+            run_id=run.id,
+            user_id=run.user_id,
+        )
+
+        if repaired_run is None:
+            raise RuntimeError(
+                f"修复后无法读取 Run： {run.id}"
+            )
+
+        return repaired_run
     
     async def get_run(
         self,
@@ -247,6 +466,9 @@ class RunRepository:
             current_step=run.current_step,
             current_event=run.current_event,
             current_tool=run.current_tool,
+            runtime_id=run.runtime_id,
+            last_heartbeat_at=run.last_heartbeat_at,
+            stale_detected_at=run.stale_detected_at,
             error_type=run.error_type,
             error_detail=run.error_detail,
             error_user_message=run.error_user_message,
@@ -270,6 +492,9 @@ class RunRepository:
         orm.current_step = run.current_step
         orm.current_event = run.current_event
         orm.current_tool = run.current_tool
+        # Lease-management fields are updated through separate database
+        # sessions by claim_runtime/touch_heartbeat/reconciliation. Copying
+        # their stale in-memory values here would overwrite fresh heartbeats.
         orm.error_type = run.error_type
         orm.error_detail = run.error_detail
         orm.error_user_message = run.error_user_message
