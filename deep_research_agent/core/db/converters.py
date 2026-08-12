@@ -42,6 +42,7 @@ def orm_to_agent_run(orm: AgentRunORM) -> AgentRun:
         id=orm.id,
         session_id=orm.session_id,
         user_id=orm.user_id,
+        idempotency_key=orm.idempotency_key,
         user_message_id=orm.user_message_id,
         assistant_message_id=orm.assistant_message_id,
         status=AgentRunStatus(orm.status),

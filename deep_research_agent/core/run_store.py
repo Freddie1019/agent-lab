@@ -20,13 +20,15 @@ class AgentRunStore:
         user_id: str,
         user_message_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> AgentRun:
         async with self._lock:
             run = AgentRun(
                 session_id=session_id,
                 user_id=user_id,
                 user_message_id=user_message_id,
-                metadata=metadata or {}
+                metadata=metadata or {},
+                idempotency_key=idempotency_key,
             )
             self._runs[run.id] = run
             return run
@@ -139,7 +141,8 @@ class AgentRunStore:
                 run.mark_running()
 
             elif event_type == "agent_complete":
-                run.mark_completed()
+                if data.get("status") == "success":
+                    run.mark_completed()
 
             elif event_type == "error":
                 error_type = data.get("type", "unknown_error")

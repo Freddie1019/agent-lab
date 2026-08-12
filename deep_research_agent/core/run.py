@@ -60,6 +60,9 @@ class AgentRun(BaseModel):
     session_id: str
     user_id: str
 
+    # 客户端请求幂等标识
+    idempotency_key: Optional[str] = None
+
     # 具体 message
     user_message_id: Optional[str] = None
     assistant_message_id: Optional[str] = None

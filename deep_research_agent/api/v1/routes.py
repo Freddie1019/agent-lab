@@ -4,8 +4,8 @@ API v1 路由
 import json
 import asyncio
 from itertools import accumulate
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Request
+from typing import Optional, Annotated
+from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from pydantic import BaseModel, Field
 from shared.rate_limiter import tracker
 from fastapi.responses import StreamingResponse
@@ -22,6 +22,7 @@ from deep_research_agent.api.auth import CurrentUser, get_current_user
 
 # 添加 run 存储
 from deep_research_agent.core.run_store import run_store
+from deep_research_agent.core.run import AgentRun
 
 # 添加 run 追溯
 from deep_research_agent.core.run_trace_store import run_trace_store
@@ -38,6 +39,13 @@ from deep_research_agent.core.db.repositories import checkpoint_repo
 
 # 添加heartbeat
 from deep_research_agent.services.run_health_service import run_health_service
+
+# 原子化
+from deep_research_agent.services.state_persistence_service import (
+    DuplicateAgentRequestError,
+    state_persistence_service,
+)
+
 
 async def _get_session_for_runtime(
     session_id: str,
@@ -199,6 +207,14 @@ async def chat_in_session_stream(
     session_id: str,
     request: ChatInSessionRequest,
     raw_request: Request,
+    idempotency_key: Annotated[
+        str,
+        Header(
+            alias="Idempotency-Key",
+            min_length=8,
+            max_length=128,
+        ),
+    ],
     current_user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -224,37 +240,51 @@ async def chat_in_session_stream(
         status="complete",
     )
 
-    # 4. 先写内存
+    run = AgentRun(
+        session_id=session_id,
+        user_id=current_user.user_id,
+        user_message_id=user_msg.id,
+        idempotency_key=idempotency_key,
+        metadata={
+            "question": request.question,
+            "entrypoint": "chat_stream",
+        },
+    )
+
+    try:
+        await state_persistence_service.start_run(
+            session_id=session_id,
+            user_id=current_user.user_id,
+            user_message=user_msg,
+            run=run,
+        )
+
+    except DuplicateAgentRequestError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "type": "duplicate_agent_request",
+                "message": (
+                    "该请求已经提交过，请勿重复执行"
+                ),
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    # 数据库事务成功后，再同步 Runtime 内存 Run 和 Session。
+    # 这样重复请求失败时不会在 run_store 中留下孤立 Run。
+    await run_store.update(run)
     await session_store.append_messages(
         session_id=session_id,
         user_id=current_user.user_id,
         messages=[user_msg],
     )
 
-    # 5. 再写数据库
-    await session_repo.add_message(
-        db=db,
-        session_id=session_id,
-        user_id=current_user.user_id,
-        message=user_msg,
-    )
 
-    # 6. 现在从 Session 重新构造 history
+    # 5. 现在从 Session 重新构造 history
     history = session.to_llm_messages()
 
-    # 7. 创建 run, 并关联 user_message_id
-    run = await run_store.create(
-        session_id=session_id,
-        user_id=current_user.user_id,
-        user_message_id=user_msg.id,
-        metadata={
-            "question": request.question,
-            "entrypoint": "chat_stream",
-        },
-    )
-    await run_repo.upsert_run(db, run)
-
-    # 8. 创建 Agent
+    # 6. 创建 Agent
     agent = ResearchAgent(
         run_id=run.id,
         session_id=session_id,
@@ -371,8 +401,6 @@ async def chat_in_session_stream(
                     
                     yield event.to_sse()
                 
-                yield "event: done\ndata: [DONE]\n\n"
-
             except Exception as e:
                 # event_generator 自己挂了 （极少见）
 
@@ -384,6 +412,11 @@ async def chat_in_session_stream(
                 )
                 await run_repo.upsert_run(db, failed_run)
 
+                last_error_data = {
+                    "type": "internal_error",
+                    "detail": str(e),
+                    "user_message": "服务内部错误，请稍后重试",
+                }
                 accumulated_content = "\n\n".join(process_fragments)
                 err_event = make_error_event(
                     type="internal_error",
@@ -395,52 +428,75 @@ async def chat_in_session_stream(
                 yield err_event.to_sse()
             
             finally:
-                # 关键：无论如何都持久化
-                # 优先保存 answer_complete 的答案；若没有则用过程内容兜底
+                try:
+                    # 先在内存中归一化最终状态，不在这里单独提交 Run。
+                    latest_run = await run_store.get(
+                        run.id,
+                        user_id=current_user.user_id,
+                    )
 
-                latest_run = await run_store.get(run.id, user_id=current_user.user_id)
-
-                if (
-                    latest_run.status.value
-                    not in {"completed", "failed", "interrupted", "cancelled"}
-                ):
                     if completed_normally:
-                        latest_run = await run_store.mark_completed(run.id)
+                        if latest_run.status.value != "completed":
+                            latest_run = await run_store.mark_completed(run.id)
                     elif last_error_data:
-                        latest_run = await run_store.mark_failed(
-                            run_id=run.id,
-                            error_type=last_error_data.get("type", "stream_error"),
-                            error_detail=json.dumps(
-                                last_error_data,
-                                ensure_ascii=False,
-                            ),
-                            error_user_message=last_error_data.get("user_message"),
-                        )
-                    else:
+                        if latest_run.status.value != "failed":
+                            latest_run = await run_store.mark_failed(
+                                run_id=run.id,
+                                error_type=last_error_data.get(
+                                    "type",
+                                    "stream_error",
+                                ),
+                                error_detail=json.dumps(
+                                    last_error_data,
+                                    ensure_ascii=False,
+                                ),
+                                error_user_message=last_error_data.get(
+                                    "user_message"
+                                ),
+                            )
+                    elif latest_run.status.value not in {
+                        "interrupted",
+                        "cancelled",
+                    }:
                         latest_run = await run_store.mark_interrupted(
                             run_id=run.id,
                             reason="stream_finished_without_completion",
                         )
-                    await run_repo.upsert_run(db, latest_run)
 
-                accumulated_content = (
-                    collected_assistant_msg or "\n\n".join(process_fragments)
-                )
-                assistant_msg = await _persist_assistant_message(
-                    session_id=session_id,
-                    user_id=current_user.user_id,
-                    accumulated_content=accumulated_content,
-                    completed_normally=completed_normally,
-                    last_error_data=last_error_data,
-                    db=db,
-                )
-                latest_run.assistant_message_id = assistant_msg.id
-                await run_store.update(latest_run)
-                await run_repo.upsert_run(db, latest_run)
+                    accumulated_content = (
+                        collected_assistant_msg
+                        or "\n\n".join(process_fragments)
+                    )
+                    assistant_msg = _build_assistant_message(
+                        accumulated_content=accumulated_content,
+                        completed_normally=completed_normally,
+                        last_error_data=last_error_data,
+                    )
 
-                if heartbeat_handle is not None:
-                    await heartbeat_handle.stop()
-                session.is_processing = False
+                    # Assistant Message + Run 最终状态/消息关联原子提交。
+                    await state_persistence_service.finalize_run(
+                        session_id=session_id,
+                        user_id=current_user.user_id,
+                        assistant_message=assistant_msg,
+                        run=latest_run,
+                    )
+
+                    # 数据库事务成功后再同步 Runtime 内存。
+                    await run_store.update(latest_run)
+                    await session_store.append_messages(
+                        session_id=session_id,
+                        user_id=current_user.user_id,
+                        messages=[assistant_msg],
+                    )
+                finally:
+                    try:
+                        if heartbeat_handle is not None:
+                            await heartbeat_handle.stop()
+                    finally:
+                        session.is_processing = False
+
+            # 只有最终事务成功后，才向客户端声明本次流结束。
+            yield "event: done\ndata: [DONE]\n\n"
     
     return StreamingResponse(
         event_generator(),
@@ -886,6 +942,34 @@ async def _persist_assistant_message(
     last_error_data: Optional[dict],
     db: AsyncSession,
     ) -> Message:
+    assistant_msg = _build_assistant_message(
+        accumulated_content=accumulated_content,
+        completed_normally=completed_normally,
+        last_error_data=last_error_data,
+    )
+
+    await session_store.append_messages(
+        session_id=session_id,
+        user_id=user_id,
+        messages=[assistant_msg],
+    )
+
+    await session_repo.add_message(
+        db=db,
+        session_id=session_id,
+        user_id=user_id,
+        message=assistant_msg,
+    )
+
+    return assistant_msg
+
+
+def _build_assistant_message(
+    *,
+    accumulated_content: str,
+    completed_normally: bool,
+    last_error_data: Optional[dict],
+) -> Message:
     if completed_normally and accumulated_content:
         assistant_msg = Message(
             role="assistant",
@@ -914,19 +998,6 @@ async def _persist_assistant_message(
                 else "未知错误"
             )
         )
-    await session_store.append_messages(
-        session_id=session_id,
-        user_id=user_id,
-        messages=[assistant_msg],
-    )
-
-    await session_repo.add_message(
-        db=db,
-        session_id=session_id,
-        user_id=user_id,
-        message=assistant_msg,
-    )
-
     return assistant_msg
 
 @router.get("/runs/{run_id}/recovery-plan", response_model=RunRecoveryPlan)

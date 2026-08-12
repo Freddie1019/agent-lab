@@ -29,6 +29,16 @@ from deep_research_agent.core.db.converters import (
     orm_to_tool_call_record,
 )
 
+async def _finish_write(
+    db: AsyncSession,
+    *,
+    commit: bool,
+) -> None:
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
+
 class SessionRepository:
     async def upsert_session(
         self,
@@ -59,7 +69,17 @@ class SessionRepository:
         session_id: str,
         user_id: str,
         message: Message,
+        *,
+        commit: bool = True,
     ) -> None:
+        existing = await db.get(
+            MessageORM,
+            message.id,
+        )
+
+        if existing is not None:
+            return
+
         db.add(
             MessageORM(
                 id=message.id,
@@ -67,12 +87,24 @@ class SessionRepository:
                 user_id=user_id,
                 role=message.role,
                 content=message.content,
-                status=getattr(message, "status", "complete"),
-                error_detail=getattr(message, "error_detail", None),
+                status=getattr(
+                    message,
+                    "status",
+                    "complete",
+                ),
+                error_detail=getattr(
+                    message,
+                    "error_detail",
+                    None,
+                ),
                 created_at=message.created_at,
             )
         )
-        await db.commit()
+
+        await _finish_write(
+            db,
+            commit=commit,
+        )
     
     async def list_messages(
         self,
@@ -205,6 +237,8 @@ class RunRepository:
         self,
         db: AsyncSession,
         run: AgentRun,
+        *,
+        commit: bool = True,
     ) -> None:
         existing = await db.get(AgentRunORM, run.id)
         
@@ -213,7 +247,7 @@ class RunRepository:
         else:
             self._update_orm(existing, run)
         
-        await db.commit()
+        await _finish_write(db, commit=commit)
 
     async def claim_runtime(
         self,
@@ -460,6 +494,7 @@ class RunRepository:
             id=run.id,
             session_id=run.session_id,
             user_id=run.user_id,
+            idempotency_key=run.idempotency_key,
             user_message_id=run.user_message_id,
             assistant_message_id=run.assistant_message_id,
             status=run.status.value if hasattr(run.status, "value") else str(run.status),
@@ -488,6 +523,7 @@ class RunRepository:
     ) -> None:
         orm.user_message_id = run.user_message_id
         orm.assistant_message_id = run.assistant_message_id
+        orm.idempotency_key = run.idempotency_key
         orm.status = run.status.value if hasattr(run.status, "value") else str(run.status)
         orm.current_step = run.current_step
         orm.current_event = run.current_event
@@ -540,7 +576,15 @@ class TraceRepository:
         self,
         db: AsyncSession,
         step: RunStep,
+        *,
+        commit: bool = True,
     ) -> None:
+
+        existing = await db.get(RunStepORM, step.id)
+
+        if existing is not None:
+            return
+
         db.add(
             RunStepORM(
                 id=step.id,
@@ -561,7 +605,7 @@ class TraceRepository:
                 completed_at=step.completed_at,
             )
         )
-        await db.commit()
+        await _finish_write(db, commit=commit)
 
     async def add_tool_call(
         self,
@@ -680,6 +724,8 @@ class CheckpointRepository:
         self,
         db: AsyncSession,
         checkpoint: RunCheckpoint,
+        *,
+        commit: bool = True,
     ) -> None:
         db.add(
             RunCheckpointORM(
@@ -696,7 +742,7 @@ class CheckpointRepository:
                 created_at=checkpoint.created_at,
             )
         )
-        await db.commit()
+        await _finish_write(db, commit=commit)
 
     async def get_latest(
         self,

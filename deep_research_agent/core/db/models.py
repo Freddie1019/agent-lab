@@ -8,6 +8,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from deep_research_agent.core.db.base import Base
@@ -79,6 +80,14 @@ class MessageORM(Base):
 class AgentRunORM(Base):
     __tablename__ = "agent_runs"
 
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_agent_run_user_idempotency_key",
+        ),
+    )
+
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
 
     session_id: Mapped[str] = mapped_column(
@@ -87,6 +96,9 @@ class AgentRunORM(Base):
         index=True,
         nullable=False,
     )
+
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
     user_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
 
     user_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
