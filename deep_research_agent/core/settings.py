@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     default_token_budget: int = Field(default=50_000, ge=1000, le=1_000_000)
     default_context_window: int = Field(default=8000, ge=1000, le=128_000)
 
+    # === AsyncIO 边界 ===
+    LLM_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0, le=600)
+    TOOL_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0, le=300)
+
     # === Service ===
     api_port: int = Field(default=8000, ge=1, le=65535)
     api_debug: bool = Field(default=False)

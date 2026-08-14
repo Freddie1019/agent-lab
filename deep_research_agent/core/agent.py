@@ -13,25 +13,23 @@ import json
 import time
 import asyncio
 import json
+from shared.audit_log import audit
 from typing import AsyncIterator, Optional
-from deep_research_agent.core.events import AgentEvent, agent_error_to_event, make_error_event
-from shared.llm_client import client, DEFAULT_MODEL
+from shared.llm_client import client, DEFAULT_MODEL, async_client
 from shared.context_manager import ContextManager
 from shared.token_counter import count_messages_tokens
 from shared.safety import safe_execute, CLIApprover
-from shared.agent_errors import AgentError, classify_exception, ToolTimeout, ToolUnavailable
-from shared.audit_log import audit
+from shared.agent_errors import AgentError, LLMTimeout, classify_exception, ToolTimeout, ToolUnavailable
 from deep_research_agent.core.prompts import RESEARCH_SYSTEM_PROMPT
-from deep_research_agent.core.tools import (
-    RESEARCH_TOOLS, RESEARCH_TOOLS_SCHEMA, get_tool_by_name,
-)
+from deep_research_agent.core.tools import RESEARCH_TOOLS, RESEARCH_TOOLS_SCHEMA, get_tool_by_name
 from deep_research_agent.core.report import RunReport
-from deep_research_agent.core.checkpoint_manager import (
-    checkpoint_manager
-)
-from deep_research_agent.core.checkpoint import (
-    CheckpointType,
-)
+from deep_research_agent.core.checkpoint_manager import checkpoint_manager
+from deep_research_agent.core.checkpoint import CheckpointType
+from deep_research_agent.core.async_runtime import BlockingCallTimeout, run_blocking
+from deep_research_agent.core.events import AgentEvent, agent_error_to_event, make_error_event
+from deep_research_agent.core.settings import get_settings
+settings = get_settings()
+
 class ResearchAgent:
     """
     深度研究 Agent
@@ -78,6 +76,50 @@ class ResearchAgent:
     def _log(self, msg: str):
         if self.verbose:
             print(msg)
+
+    async def _create_chat_completion(
+        self,
+        messages: list[dict],
+    ):
+        """ 使用原生异步 SDK 调用 LLM， 并时加总超时 """
+
+        try:
+            async with asyncio.timeout(
+                settings.LLM_TIMEOUT_SECONDS
+            ):
+                return await async_client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=RESEARCH_TOOLS_SCHEMA,
+                    temperature=0,
+                )
+        except TimeoutError as exc:
+            raise LLMTimeout(
+                "LLM chat completion exceeded"
+                f"{settings.LLM_TIMEOUT_SECONDS:.3f} seconds"
+            ) from exc
+
+    async def _execute_tool(
+        self,
+        metadata,
+        tool_args: dict,
+        *,
+        agent_reasoning: str = "",
+    ):
+        """在线程池执行当前同步工具栈。"""
+
+        try:
+            return await run_blocking(
+                safe_execute,
+                metadata=metadata,
+                tool_args=tool_args,
+                approver=self.approver,
+                agent_reasoning=agent_reasoning,
+                operation=f"tool:{metadata.name}",
+                timeout_seconds=settings.TOOL_TIMEOUT_SECONDS,
+            )
+        except BlockingCallTimeout as exc:
+            raise ToolTimeout(str(exc)) from exc
     
     async def _execute_tool_with_retry(
         self,
@@ -90,10 +132,9 @@ class ResearchAgent:
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                result = safe_execute(
+                result = await  self._execute_tool(
                     metadata=metadata,
                     tool_args=tool_args,
-                    approver=self.approver,
                 )
                 return ("success", result, None)
             except (ToolTimeout, ToolUnavailable) as e:
@@ -287,12 +328,7 @@ class ResearchAgent:
             yield AgentEvent(type="step_start", step=step, data={"step": step})
 
             try:
-                response = client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=RESEARCH_TOOLS_SCHEMA,
-                    temperature=0,
-                )
+                response = await self._create_chat_completion(messages)
             except Exception as e:
                 err = classify_exception(e)
                 yield agent_error_to_event(
@@ -357,10 +393,10 @@ class ResearchAgent:
                         success = False
                     else:
                         try:
-                            result = safe_execute(
+                            result = await self._execute_tool(
                                 metadata=metadata,
                                 tool_args=tool_args,
-                                approver=self.approver,
+                                agent_reasoning=msg.content or "",
                             )
                             success = True
                         except AgentError as e:

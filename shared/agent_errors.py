@@ -43,6 +43,10 @@ class ToolTimeout(AgentError):
     user_message = "工具执行超时，请重试或换个方式查询"
     retryable = True
 
+class LLMTimeout(AgentError):
+    category = ErrorCategory.TRANSIENT
+    user_message = "模型响应超时，请稍后重试"
+    retryable = True
 
 class ToolRateLimit(AgentError):
     category = ErrorCategory.RATE_LIMIT

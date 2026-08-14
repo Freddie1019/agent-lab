@@ -9,7 +9,7 @@ from typing import Literal, Optional
 from shared.agent_errors import (
     AgentError, ToolRateLimit, ToolTimeout,
     ToolUnavailable, ToolInvalidArgument,
-    ToolPermissionDenied, ToolHumanRejected,
+    ToolPermissionDenied, ToolHumanRejected, LLMTimeout,
 )
 
 # 所有可能的事件类型
@@ -109,6 +109,7 @@ def agent_error_to_event(
         ToolInvalidArgument: ("tool_invalid_argument", False, None),
         ToolPermissionDenied: ("tool_permission_denied", False, None),
         ToolHumanRejected: ("user_rejected_action", False, None),
+        LLMTimeout: ("llm_timeout", True, 30.0),
     }
 
     error_type, recoverable, retry_after = type_map.get(
