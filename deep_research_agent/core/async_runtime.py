@@ -31,14 +31,19 @@ async def run_blocking(
 ) -> T:
     """在线程池执行同步调用，同时限制等待时间"""
 
+    deadline = asyncio.timeout(timeout_seconds)
+
     try:
-        async with asyncio.timeout(timeout_seconds):
+        async with deadline:
             return await asyncio.to_thread(
                 func,
                 *args,
                 **kwargs,
             )
     except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        
         raise BlockingCallTimeout(
             operation=operation,
             timeout_seconds=timeout_seconds,

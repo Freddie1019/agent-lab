@@ -54,23 +54,20 @@ def register_error_handlers(app: FastAPI):
         detail = exc.detail
 
         if isinstance(detail, dict):
-            error_type = detail.get("error_type", "http-error")
-            title = detail.get("title", exc.__class__.__name__)
-            message = detail.get("detail", str(detail))
-            errors = detail.get("errors")
-        else:
-            error_type = "http-error"
-            title = exc.__class__.__name__
-            message = str(detail)
-            errors = None
+            # 结构化 detail（如任务路由的 {"type": ..., "message": ...}）
+            # 保持 FastAPI 默认行为，原样返回，避免被改写成字符串
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": detail},
+                headers=exc.headers,
+            )
 
         return _make_error_response(
             status_code=exc.status_code,
-            error_type=error_type,
-            title=title,
-            detail=message,
+            error_type="http-error",
+            title=exc.__class__.__name__,
+            detail=str(detail),
             instance=str(request.url.path),
-            errors=errors,
         )
 
     @app.exception_handler(RequestValidationError)

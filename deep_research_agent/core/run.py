@@ -60,6 +60,9 @@ class AgentRun(BaseModel):
     session_id: str
     user_id: str
 
+    # 任务id
+    task_id: Optional[str] = None
+
     # 客户端请求幂等标识
     idempotency_key: Optional[str] = None
 

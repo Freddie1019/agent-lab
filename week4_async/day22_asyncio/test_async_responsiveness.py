@@ -79,3 +79,18 @@ async def test_block_call_has_timeout() -> None:
     elapsed = time.perf_counter() - started_at
 
     assert elapsed < 0.15
+
+@pytest.mark.asyncio
+async def test_preserves_inner_timeout_error() -> None:
+    def raise_inner_timeout() -> None:
+        raise TimeoutError("inner operation timeout")
+
+    with pytest.raises(
+        TimeoutError,
+        match="inner operation timeout",
+    ):
+        await run_blocking(
+            raise_inner_timeout,
+            operation="test: inner-timeout",
+            timeout_seconds=1
+        )

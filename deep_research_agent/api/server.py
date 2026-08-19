@@ -22,6 +22,9 @@ from deep_research_agent.api.v1 import auth_routes
 # 挂载 run 路由
 from deep_research_agent.api.v1 import runs_routes
 
+# 挂载 task 路由
+from deep_research_agent.api.v1 import task_routers
+
 settings = get_settings()
 
 logger = logging.getLogger(__name__)
@@ -92,3 +95,6 @@ app.include_router(auth_routes.router)
 
 # 挂载 run 路由
 app.include_router(runs_routes.router)
+
+# 挂载 task 路由
+app.include_router(task_routers.router)

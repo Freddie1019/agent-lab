@@ -4,6 +4,7 @@ from deep_research_agent.core.db.models import (
     RunStepORM,
     SessionORM,
     ToolCallRecordORM,
+    TaskRecordORM,
 )
 from deep_research_agent.core.run import AgentRun, AgentRunStatus
 from deep_research_agent.core.run_trace import (
@@ -14,6 +15,9 @@ from deep_research_agent.core.run_trace import (
     ToolCallStatus,
 )
 from deep_research_agent.core.session import Message, Session
+
+from deep_research_agent.core.task import TaskRecord, TaskStatus
+
 def orm_to_message(orm: MessageORM) -> Message:
     return Message(
         id=orm.id,
@@ -42,6 +46,7 @@ def orm_to_agent_run(orm: AgentRunORM) -> AgentRun:
         id=orm.id,
         session_id=orm.session_id,
         user_id=orm.user_id,
+        task_id=orm.task_id,
         idempotency_key=orm.idempotency_key,
         user_message_id=orm.user_message_id,
         assistant_message_id=orm.assistant_message_id,
@@ -84,6 +89,23 @@ def orm_to_run_step(orm: RunStepORM) -> RunStep:
         completed_at=orm.completed_at,
     )
 
+def orm_to_task_record(orm: TaskRecordORM) -> TaskRecord:
+    return TaskRecord(
+        id=orm.id,
+        user_id=orm.user_id,
+        session_id=orm.session_id,
+        task_type=orm.task_type,
+        status=TaskStatus(orm.status),
+        idempotency_key=orm.idempotency_key,
+        request_hash=orm.request_hash,
+        request_payload=orm.request_payload or {},
+        error_type=orm.error_type,
+        error_detail=orm.error_detail,
+        created_at=orm.created_at,
+        updated_at=orm.updated_at,
+        started_at=orm.started_at,
+        completed_at=orm.completed_at,
+    )
 
 def orm_to_tool_call_record(orm: ToolCallRecordORM) -> ToolCallRecord:
     return ToolCallRecord(

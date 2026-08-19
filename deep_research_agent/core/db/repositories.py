@@ -10,6 +10,7 @@ from deep_research_agent.core.db.models import (
     SessionORM,
     ToolCallRecordORM,
     RunCheckpointORM,
+    TaskRecordORM,
 )
 
 from deep_research_agent.core.checkpoint import (
@@ -27,6 +28,12 @@ from deep_research_agent.core.db.converters import (
     orm_to_run_step,
     orm_to_session,
     orm_to_tool_call_record,
+    orm_to_task_record,
+)
+
+from deep_research_agent.core.task import (
+    TaskRecord,
+    TaskStatus,
 )
 
 async def _finish_write(
@@ -494,6 +501,7 @@ class RunRepository:
             id=run.id,
             session_id=run.session_id,
             user_id=run.user_id,
+            task_id=run.task_id,
             idempotency_key=run.idempotency_key,
             user_message_id=run.user_message_id,
             assistant_message_id=run.assistant_message_id,
@@ -521,6 +529,7 @@ class RunRepository:
         orm: AgentRunORM,
         run: AgentRun,
     ) -> None:
+        orm.task_id = run.task_id
         orm.user_message_id = run.user_message_id
         orm.assistant_message_id = run.assistant_message_id
         orm.idempotency_key = run.idempotency_key
@@ -570,7 +579,27 @@ class RunRepository:
         )
         return [orm_to_agent_run(orm) for orm in orms]
 
+    async def get_latest_run_by_task(
+        self,
+        db: AsyncSession,
+        task_id: str,
+        user_id: str,
+    ) -> AgentRun | None:
+        result = await db.execute(
+            select(AgentRunORM)
+            .where(AgentRunORM.task_id == task_id)
+            .where(AgentRunORM.user_id == user_id)
+            .order_by(AgentRunORM.created_at.desc())
+            .limit(1)
+        )
 
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+
+        return orm_to_agent_run(orm)
+    
 class TraceRepository:
     async def add_step(
         self,
@@ -780,7 +809,137 @@ class CheckpointRepository:
             created_at=orm.created_at,
         )
 
+class TaskRepository:
+    async def add(
+        self,
+        db: AsyncSession,
+        task: TaskRecord,
+        *,
+        commit: bool = True,
+    ) -> None:
+        db.add(
+            TaskRecordORM(
+                id=task.id,
+                user_id=task.user_id,
+                session_id=task.session_id,
+                task_type=task.task_type,
+                status=task.status.value,
+                idempotency_key=task.idempotency_key,
+                request_hash=task.request_hash,
+                request_payload=task.request_payload,
+                error_type=task.error_type,
+                error_detail=task.error_detail,
+                created_at=task.created_at,
+                updated_at=task.updated_at,
+                started_at=task.started_at,
+                completed_at=task.completed_at,
+            )
+        )
+
+        await _finish_write(
+            db,
+            commit=commit
+        )
+
+    async def get(
+        self,
+        db: AsyncSession,
+        task_id: str,
+        user_id: str,
+    ) -> TaskRecord | None:
+        result = await db.execute(
+            select(TaskRecordORM)
+            .where(TaskRecordORM.id == task_id)
+            .where(TaskRecordORM.user_id == user_id)
+        )
+
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+
+        return orm_to_task_record(orm)
+
+    async def get_by_idempotency_key(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        idempotency_key: str,
+    ) -> TaskRecord | None:
+        result = await db.execute(
+            select(TaskRecordORM)
+            .where(TaskRecordORM.user_id == user_id)
+            .where(
+                TaskRecordORM.idempotency_key == idempotency_key
+            )
+        )
+
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+
+        return orm_to_task_record(orm)
+
+    async def list_by_user(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        *,
+        status: TaskStatus | None = None,
+        limit: int = 50,
+    ) -> list[TaskRecord]:
+        statement = (
+            select(TaskRecordORM)
+            .where(TaskRecordORM.user_id == user_id)
+            .order_by(TaskRecordORM.created_at.desc())
+            .limit(limit)
+        )
+
+        if status is not None:
+            statement = statement.where(
+                TaskRecordORM.status == status.value
+            )
+
+        result = await db.execute(statement)
+
+        return [
+            orm_to_task_record(orm)
+            for orm in result.scalars().all()
+        ]
+    async def update(
+        self,
+        db: AsyncSession,
+        task: TaskRecord,
+        *,
+        commit: bool = True,
+    ) -> TaskRecord | None:
+        result = await db.execute(
+            select(TaskRecordORM)
+            .where(TaskRecordORM.id == task.id)
+            .where(TaskRecordORM.user_id == task.user_id)
+        )
+        orm = result.scalar_one_or_none()
+
+        if orm is None:
+            return None
+
+        orm.status = task.status.value
+        orm.error_type = task.error_type
+        orm.error_detail = task.error_detail
+        orm.updated_at = task.updated_at
+        orm.started_at = task.started_at
+        orm.completed_at = task.completed_at
+
+        await _finish_write(
+            db,
+            commit=commit,
+        )
+
+        return task
+
 session_repo = SessionRepository()
 run_repo = RunRepository()
 trace_repo = TraceRepository()
 checkpoint_repo = CheckpointRepository()
+task_repo = TaskRepository()

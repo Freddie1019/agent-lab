@@ -97,6 +97,13 @@ class AgentRunORM(Base):
         nullable=False,
     )
 
+    task_id: Mapped[str | None] = mapped_column(
+        String(128),
+        ForeignKey("task_records.id"),
+        index=True,
+        nullable=True,
+    )
+
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     user_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
@@ -150,6 +157,10 @@ class AgentRunORM(Base):
     tool_calls: Mapped[list["ToolCallRecordORM"]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
+    )
+
+    task: Mapped["TaskRecordORM | None"] = relationship(
+        back_populates="runs",
     )
 
 class RunStepORM(Base):
@@ -287,4 +298,96 @@ class RunCheckpointORM(Base):
         DateTime,
         default=datetime.now,
         nullable=False,
+    )
+
+class TaskRecordORM(Base):
+    __tablename__ = "task_records"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_task_user_idempotency_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(128),
+        primary_key=True,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        index=True,
+        nullable=False,
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("sessions.id"),
+        index=True,
+        nullable=False,
+    )
+
+    task_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        index=True,
+        nullable=False,
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+
+    request_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    request_payload: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+    )
+
+    error_type: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+
+    error_detail: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    runs: Mapped[list["AgentRunORM"]] = relationship(
+        back_populates="task",
     )
